@@ -18,7 +18,7 @@ from src.core.registry import unealta
 # ---- Alias -> comanda reală de pe sistemul tău ----
 # Modifică valorile astea ca să corespundă cu binarele instalate la tine.
 ALIAS_APLICATII = {
-    "browser": "firefox",
+    "browser": "vivaldi",
     "editor": "code",
     "terminal": "alacritty",       # schimbă cu kitty/konsole/etc dacă ai altceva
     "file_manager": "nautilus",    # schimbă cu dolphin/thunar/etc dacă ai altceva
@@ -103,6 +103,7 @@ def deschide_aplicatie(alias: str):
             ),
         }
     },
+    max_linii=35,  # ps aux poate fi 150+ linii; 35 = top procese + header, suficient pentru analiză
 )
 def ruleaza_comanda_info(alias: str):
     """Rulează o comandă read-only dintr-un set fix și returnează output-ul."""

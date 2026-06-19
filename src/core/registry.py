@@ -23,38 +23,88 @@ REGISTRU_FUNCTII = {}
 # Nume funcție -> types.FunctionDeclaration (pentru a construi Tool-urile)
 DECLARATII_FUNCTII = {}
 
+# Nume funcție -> bool: True dacă unealta necesită confirmare înainte de execuție
+CONFIRMARE_FUNCTII = {}
 
-def unealta(description: str, parameters: dict | None = None):
+# Nume funcție -> int | None: numărul maxim de linii de returnat (None = fără limită)
+MAX_LINII_FUNCTII = {}
+
+# Limita globală de caractere per rezultat trimis la model (~2000 tokens siguri)
+LIMITA_GLOBALA_CHARS = 8000
+
+
+def _trunchează_output(text: str, max_linii: int | None) -> str:
+    """
+    Trunchiază un output lung păstrând header-ul și primele N linii utile.
+    Header-ul (prima linie) e întotdeauna păstrat — conține numele coloanelor.
+    """
+    if not isinstance(text, str):
+        return text
+
+    # Aplicăm mai întâi limita globală de caractere
+    if len(text) > LIMITA_GLOBALA_CHARS:
+        text = text[:LIMITA_GLOBALA_CHARS]
+        truncheat_chars = True
+    else:
+        truncheat_chars = False
+
+    linii = text.splitlines()
+
+    if max_linii is not None and len(linii) > max_linii + 1:
+        # +1 pentru header
+        header = linii[0]
+        date = linii[1:max_linii + 1]
+        total_original = len(linii)
+        text = "\n".join([header] + date)
+        text += f"\n[... truncheat: afișate {max_linii} din {total_original} linii]"
+    elif truncheat_chars:
+        text += "\n[... truncheat: output prea lung]"
+
+    return text
+
+
+def unealta(
+    description: str,
+    parameters: dict | None = None,
+    necesita_confirmare: bool = False,
+    max_linii: int | None = None,
+):
     """
     Decorator pentru a transforma o funcție Python într-o unealtă
     pe care Jarvis o poate apela prin function calling.
 
     Parametri:
-        description: explicația pe care o citește Gemini, ca să decidă
-                      CÂND să folosească unealta. Scrie-o clar și specific.
-        parameters:  schema parametrilor, în format dict simplu, ex:
+        description:          explicația pe care o citește Gemini, ca să decidă
+                              CÂND să folosească unealta. Scrie-o clar și specific.
+        parameters:           schema parametrilor, în format dict simplu, ex:
 
-                      {
-                          "cale": {
-                              "type": "STRING",
-                              "description": "Calea fișierului de citit"
-                          },
-                          "linii": {
-                              "type": "INTEGER",
-                              "description": "Câte linii să citească",
-                              "optional": True
-                          }
-                      }
+                              {
+                                  "cale": {
+                                      "type": "STRING",
+                                      "description": "Calea fișierului de citit"
+                                  },
+                                  "linii": {
+                                      "type": "INTEGER",
+                                      "description": "Câte linii să citească",
+                                      "optional": True
+                                  }
+                              }
 
-                      Dacă funcția nu are parametri, lasă None sau {}.
+                              Dacă funcția nu are parametri, lasă None sau {}.
+        necesita_confirmare:  dacă True, Jarvis va cere aprobare explicită
+                              înainte de a executa unealta. Folosește pentru
+                              acțiuni ireversibile sau cu impact mare.
+        max_linii:            numărul maxim de linii de returnat la model.
+                              Folosește pentru comenzi cu output lung (ps aux,
+                              ls -la pe directoare mari etc.). None = fără limită.
+                              Header-ul (prima linie) e întotdeauna păstrat.
 
-    Exemplu de utilizare (într-un fișier din tools/):
-
+    Exemplu:
         @unealta(
-            description="Returnează data și ora curentă a sistemului.",
+            description="Listează procesele active.",
+            max_linii=30,   # ps aux poate fi 150+ linii, trimitem doar 30
         )
-        def get_ora_curenta():
-            return datetime.now().strftime("%H:%M, %d.%m.%Y")
+        def procese_active(): ...
     """
     def decorator(func):
         nume = func.__name__
@@ -92,6 +142,8 @@ def unealta(description: str, parameters: dict | None = None):
 
         REGISTRU_FUNCTII[nume] = func
         DECLARATII_FUNCTII[nume] = declaratie
+        CONFIRMARE_FUNCTII[nume] = necesita_confirmare
+        MAX_LINII_FUNCTII[nume] = max_linii
 
         # Returnăm funcția originală neschimbată, ca să poată fi
         # apelată normal și din alte părți de cod (teste, etc.)
@@ -116,9 +168,8 @@ def get_unelte_pentru_gemini() -> list[types.Tool]:
 
 def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
     """
-    Rulează o funcție din registru în siguranță.
-    Dacă funcția nu există sau crapă, returnăm o eroare clară,
-    ca Jarvis să poată reacționa inteligent, nu să se blocheze.
+    Rulează o funcție din registru în siguranță, cu truncare automată
+    a output-urilor lungi pentru a nu depăși token limit-ul modelului.
     """
     if nume_functie not in REGISTRU_FUNCTII:
         return {"eroare": f"Funcția '{nume_functie}' nu există în registru."}
@@ -126,6 +177,12 @@ def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
     try:
         functie = REGISTRU_FUNCTII[nume_functie]
         rezultat = functie(**argumente) if argumente else functie()
+
+        # Truncăm outputul dacă unealta are max_linii setat
+        if isinstance(rezultat, str):
+            max_linii = MAX_LINII_FUNCTII.get(nume_functie)
+            rezultat = _trunchează_output(rezultat, max_linii)
+
         return {"rezultat": rezultat}
     except Exception as e:
         return {"eroare": f"Funcția a generat o eroare: {str(e)}"}
