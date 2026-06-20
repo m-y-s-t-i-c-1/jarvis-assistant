@@ -8,6 +8,7 @@ from groq import Groq
 
 from src import tools  # noqa: F401  -- declanșează înregistrarea uneltelor
 from src.core.agent import agent_loop
+from src.core.jobs import porneste_thread_watcher
 
 load_dotenv()
 
@@ -114,6 +115,9 @@ def ruleaza_cu_fallback(istoric: list) -> str:
 
 
 # ---- Bucla principală de conversație ----
+# Pornim watcher-ul pentru anunțuri proactive de joburi în fundal
+porneste_thread_watcher()
+
 istoric = []
 
 print(f"Jarvis este activ. {len(_gemini_chei)} cheie(i) Gemini încărcată(e).")
