@@ -18,7 +18,7 @@ from src.core.registry import unealta
 # ---- Alias -> comanda reală de pe sistemul tău ----
 # Modifică valorile astea ca să corespundă cu binarele instalate la tine.
 ALIAS_APLICATII = {
-    "browser": "firefox",
+    "browser": "vivaldi",
     "editor": "code",
     "terminal": "alacritty",       # schimbă cu kitty/konsole/etc dacă ai altceva
     "file_manager": "nautilus",    # schimbă cu dolphin/thunar/etc dacă ai altceva

@@ -90,4 +90,4 @@ if __name__ == "__main__":
         text = transcrie(audio)
         print(f"\n>>> Ai spus: \"{text}\"\n")
     else:
-        print("[Nimic de transcris]")s
+        print("[Nimic de transcris]")
