@@ -95,7 +95,7 @@ Reguli de comportament:
 def porneste_bucla_audio(
     istoric: list | None = None,
     rotatie_clienti=None,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3.6-flash",
 ) -> None:
     """
     Pornește bucla audio continuă VAD → STT → Agent → TTS.

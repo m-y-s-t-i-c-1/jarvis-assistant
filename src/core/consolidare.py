@@ -174,7 +174,7 @@ class ConsolidareMemorie:
             print(f"[Consolidare] Eroare AI: {e}")
             return {"consolidate": [], "de_sters": [], "observatii": f"Eroare: {e}"}
 
-    def ruleaza(self, client=None, model: str = "gemini-2.5-flash") -> dict:
+    def ruleaza(self, client=None, model: str = "gemini-3.6-flash") -> dict:
         """
         Rulează un ciclu complet de consolidare:
             1. Deduplicare rapidă (fără AI)

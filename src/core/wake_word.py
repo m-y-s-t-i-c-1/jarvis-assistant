@@ -79,7 +79,7 @@ def asteapta_wake_word() -> None:
 def porneste_cu_wake_word(
     istoric: list | None = None,
     rotatie_clienti=None,
-    model_gemini: str = "gemini-2.5-flash",
+    model_gemini: str = "gemini-3.6-flash",
 ) -> None:
     """
     Buclă permanentă: ascultă pasiv → detectează → conversație → repeat.

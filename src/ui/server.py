@@ -46,7 +46,7 @@ _gemini_chei    = [k for k in _gemini_chei if k]
 _gemini_clienti = [genai.Client(api_key=k) for k in _gemini_chei]
 _gemini_rotatie = itertools.cycle(_gemini_clienti)
 
-GEMINI_MODEL   = "gemini-2.5-flash"
+GEMINI_MODEL   = "gemini-3.6-flash"
 ERORI_FALLBACK = (503, 429, 500, 403)
 
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.

@@ -15,6 +15,13 @@ from src.core.database import db
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.consolidare import consolidare
+from src.core.router import clasifica
+from src.core.llm_provider import (
+    intreaba_nvidia_conversatie,
+    intreaba_nvidia_cod,
+    ruleaza_cascada_externa,
+    istoric_la_mesaje_openai,
+)
 
 load_dotenv()
 
@@ -34,7 +41,7 @@ _gemini_rotatie = itertools.cycle(_gemini_clienti)
 groq_key    = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_key) if groq_key else None
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 GROQ_MODEL   = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
@@ -63,7 +70,35 @@ Mod vocal:
 - Formulează răspunsuri ca propoziții naturale, de parcă vorbești cu cineva.
 """
 
+# ---- Coduri HTTP care declanșează trecerea la următoarea cheie ----
 ERORI_FALLBACK = (503, 429, 500, 403)
+
+# ---- Excepții de rețea/conexiune care NU au cod HTTP în mesaj, dar tot
+# trebuie tratate ca eșec temporar al cheii curente, nu ca eroare fatală.
+# httpx.RemoteProtocolError ("Server disconnected without sending a
+# response") e cel mai frecvent exemplu — apare la conexiuni instabile
+# sau când Google închide conexiunea brusc, independent de cod HTTP.
+try:
+    import httpx
+    EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)
+except ImportError:
+    EXCEPTII_RETEA = ()
+
+
+def _este_eroare_temporara(e: Exception) -> bool:
+    """
+    Decide dacă o excepție trebuie tratată ca eșec temporar al cheii curente
+    (încercăm cheia următoare) sau ca eroare fatală (o propagăm).
+
+    Verifică două lucruri:
+    1. Dacă mesajul erorii conține unul din codurile HTTP din ERORI_FALLBACK.
+    2. Dacă excepția e de tip rețea/conexiune (EXCEPTII_RETEA) — acestea nu
+       au neapărat un cod HTTP în mesaj (ex: conexiune întreruptă brusc).
+    """
+    mesaj_eroare = str(e)
+    are_cod_cunoscut = any(str(cod) in mesaj_eroare for cod in ERORI_FALLBACK)
+    e_eroare_retea = isinstance(e, EXCEPTII_RETEA)
+    return are_cod_cunoscut or e_eroare_retea
 
 
 def groq_fallback(istoric: list, system_prompt: str) -> str:
@@ -91,22 +126,84 @@ def groq_fallback(istoric: list, system_prompt: str) -> str:
     return raspuns.choices[0].message.content
 
 
-def ruleaza_cu_fallback(istoric: list, system_prompt: str) -> str:
+def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
+    """
+    Calea "unelte": Gemini (toate cheile) -> Groq -> cascada finală
+    (OpenRouter -> NVIDIA generic -> Bytez). Folosită pentru orice cerere
+    clasificată drept "unelte" de router.py, și ca ultimă plasă și pentru
+    celelalte categorii, dacă NVIDIA specializat + Groq eșuează.
+    """
     for _ in range(len(_gemini_clienti)):
         client_curent = next(_gemini_rotatie)
         try:
             return agent_loop(client_curent, GEMINI_MODEL, system_prompt, istoric)
         except Exception as e:
-            mesaj_eroare = str(e)
-            este_eroare_server = any(str(cod) in mesaj_eroare for cod in ERORI_FALLBACK)
-            if este_eroare_server:
-                print(f"[Cheie Gemini indisponibilă ({mesaj_eroare[:50]}...) — încerc următoarea]")
+            if _este_eroare_temporara(e):
+                print(f"[Cheie Gemini indisponibilă ({str(e)[:80]}...) — încerc următoarea]")
                 time.sleep(0.5)
                 continue
             raise
 
     print("[Toate cheile Gemini sunt indisponibile — comut pe Groq]")
-    return groq_fallback(istoric, system_prompt)
+    try:
+        return groq_fallback(istoric, system_prompt)
+    except Exception as e:
+        print(f"[Groq indisponibil ({str(e)[:80]}) — încerc cascada externă]")
+
+    rezultat_extern = ruleaza_cascada_externa(istoric, system_prompt)
+    if rezultat_extern:
+        return rezultat_extern
+
+    return (
+        "Vasea, toți providerii disponibili (Gemini, Groq, OpenRouter, "
+        "NVIDIA NIM, Bytez) sunt indisponibili momentan. Încearcă din nou "
+        "peste câteva minute."
+    )
+
+
+def _ultimul_mesaj_utilizator(istoric: list) -> str:
+    """Extrage textul ultimului mesaj de tip user din istoric, pentru clasificare."""
+    if not istoric:
+        return ""
+    ultimul = istoric[-1]
+    if not hasattr(ultimul, "parts"):
+        return ""
+    return " ".join(
+        p.text for p in ultimul.parts if hasattr(p, "text") and p.text
+    )
+
+
+def ruleaza_cu_fallback(istoric: list, system_prompt: str) -> str:
+    """
+    Punctul de intrare principal. Clasifică cererea (router.py) și decide
+    ce provider încearcă întâi:
+
+        "unelte"      -> direct Gemini (singurul cu tool-calling funcțional)
+        "cod"         -> NVIDIA (cheia dedicată de coding) întâi
+        "conversatie" -> NVIDIA (cheile dedicate de conversație) întâi
+
+    Pentru "cod"/"conversatie", dacă NVIDIA specializat eșuează, cade pe
+    calea completă Gemini -> Groq -> cascada finală (_ruleaza_gemini_apoi_restul).
+    """
+    text_cerere = _ultimul_mesaj_utilizator(istoric)
+    categorie = clasifica(text_cerere)
+    print(f"[Router] Cerere clasificată drept: '{categorie}'")
+
+    if categorie == "unelte":
+        return _ruleaza_gemini_apoi_restul(istoric, system_prompt)
+
+    mesaje_openai = istoric_la_mesaje_openai(istoric, system_prompt)
+
+    if categorie == "cod":
+        rezultat = intreaba_nvidia_cod(mesaje_openai)
+    else:
+        rezultat = intreaba_nvidia_conversatie(mesaje_openai)
+
+    if rezultat:
+        return rezultat
+
+    print(f"[NVIDIA indisponibil pentru categoria '{categorie}' — trec pe Gemini]")
+    return _ruleaza_gemini_apoi_restul(istoric, system_prompt)
 
 
 def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
@@ -146,7 +243,7 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             client_mem = next(_gemini_rotatie)
             threading.Thread(
                 target=memorie.extrage_si_salveaza,
-                args=(mesaj_utilizator, raspuns_text, sesiune_id, client_mem, GEMINI_MODEL),
+                args=(mesaj_utilizator, raspuns_text, sesiune_id, client_mem),
                 daemon=True,
             ).start()
         except Exception as e:

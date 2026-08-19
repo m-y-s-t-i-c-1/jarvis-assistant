@@ -93,7 +93,7 @@ def proceseaza(
     istoric: list,
     sesiune_id: str,
     client=None,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3.6-flash",
 ) -> list:
     """
     Verifică dacă istoricul depășește limita și, dacă da, rezumă

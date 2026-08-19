@@ -68,7 +68,7 @@ class ManagerMemorie:
         raspuns_jarvis: str,
         sesiune_id: str,
         client,
-        model: str = "gemini-2.5-flash",
+        model: str = "gemini-3.6-flash",
     ) -> int:
         """
         Trimite conversația la Gemini, extrage fapte/preferințe/context
