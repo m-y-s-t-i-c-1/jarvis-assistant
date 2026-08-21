@@ -13,6 +13,12 @@ Cum funcționează:
 
 Adăugarea unei unelte noi = scrii funcția în tools/, o decorezi cu @unealta,
 și apare automat în sistem. Nu trebuie să modifici nimic în main.py sau agent.py.
+
+Task 6.6 — filtrare de unelte: get_unelte_pentru_gemini() acceptă acum un
+parametru opțional `doar_functiile`, care restricționează lista de unelte
+trimise la Gemini la un subset specific. Folosit de src/core/subagenti.py
+ca să dea fiecărui sub-agent specializat (Software/DevOps/Cercetare) DOAR
+uneltele relevante lui, nu tot registrul complet.
 """
 
 from google.genai import types
@@ -152,18 +158,40 @@ def unealta(
     return decorator
 
 
-def get_unelte_pentru_gemini() -> list[types.Tool]:
+def get_unelte_pentru_gemini(doar_functiile: list[str] | None = None) -> list[types.Tool]:
     """
     Construiește lista de Tool-uri de trimis la Gemini, din toate
     funcțiile înregistrate până în acest moment.
 
     Trebuie apelată DUPĂ ce toate modulele din tools/ au fost importate
     (vezi tools/__init__.py), altfel DECLARATII_FUNCTII e încă goală.
+
+    Parametri:
+        doar_functiile: dacă e furnizată, restricționează lista returnată
+                        DOAR la numele din această listă (nume necunoscute
+                        sunt ignorate silențios). None (default) = toate
+                        uneltele înregistrate, comportament neschimbat.
+
+                        Folosit de sub-agenții specializați (subagenti.py)
+                        ca să limiteze ce poate apela fiecare (ex: agentul
+                        de Cercetare nu ar trebui să poată rula git push).
     """
     if not DECLARATII_FUNCTII:
         return []
 
-    return [types.Tool(function_declarations=list(DECLARATII_FUNCTII.values()))]
+    if doar_functiile is None:
+        declaratii = list(DECLARATII_FUNCTII.values())
+    else:
+        declaratii = [
+            DECLARATII_FUNCTII[nume]
+            for nume in doar_functiile
+            if nume in DECLARATII_FUNCTII
+        ]
+
+    if not declaratii:
+        return []
+
+    return [types.Tool(function_declarations=declaratii)]
 
 
 def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:

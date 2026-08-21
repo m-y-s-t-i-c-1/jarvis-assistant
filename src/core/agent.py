@@ -74,11 +74,25 @@ def _extrage_continut(raspuns):
     return continut, apeluri_functii, None
 
 
-def agent_loop(client, model: str, system_prompt: str, istoric: list) -> str:
+def agent_loop(
+    client,
+    model: str,
+    system_prompt: str,
+    istoric: list,
+    unelte_permise: list[str] | None = None,
+) -> str:
     """
     Trimite istoricul la model și, cât timp modelul cere apeluri de funcții,
     le execută și continuă bucla. Se termină când modelul dă un răspuns
     text final (fără apel de funcție).
+
+    Parametri:
+        unelte_permise: (Task 6.6) dacă e furnizat, restricționează uneltele
+                        disponibile lui Gemini la DOAR această listă de nume.
+                        None (default) = toate uneltele înregistrate, exact
+                        comportamentul de dinainte. Folosit de subagenti.py
+                        ca să dea fiecărui sub-agent specializat doar
+                        uneltele lui, nu tot registrul.
 
     Plasă de siguranță împotriva halucinațiilor: dacă unelte sunt disponibile
     dar modelul răspunde direct cu text ce sugerează că ar fi trebuit să
@@ -90,7 +104,7 @@ def agent_loop(client, model: str, system_prompt: str, istoric: list) -> str:
     mesaj explicativ către Vasea, ca ruleaza_cu_fallback din main.py să
     poată decide dacă încearcă altă cheie sau afișează eroarea.
     """
-    unelte = get_unelte_pentru_gemini()
+    unelte = get_unelte_pentru_gemini(doar_functiile=unelte_permise)
     a_facut_deja_retry_fortat = False
     a_folosit_tool_in_aceasta_tura = False
 

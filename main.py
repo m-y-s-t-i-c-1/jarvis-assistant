@@ -16,6 +16,8 @@ from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.consolidare import consolidare
 from src.core.router import clasifica
+from src.core.monitor_ecran import porneste_monitorizare_ecran
+from src.tools.vedere import analizeaza_pentru_alerta
 from src.core.llm_provider import (
     intreaba_nvidia_conversatie,
     intreaba_nvidia_cod,
@@ -41,7 +43,7 @@ _gemini_rotatie = itertools.cycle(_gemini_clienti)
 groq_key    = os.getenv("GROQ_API_KEY")
 groq_client = Groq(api_key=groq_key) if groq_key else None
 
-GEMINI_MODEL = "gemini-3.6-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 GROQ_MODEL   = "llama-3.3-70b-versatile"
 
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
@@ -243,7 +245,7 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             client_mem = next(_gemini_rotatie)
             threading.Thread(
                 target=memorie.extrage_si_salveaza,
-                args=(mesaj_utilizator, raspuns_text, sesiune_id, client_mem),
+                args=(mesaj_utilizator, raspuns_text, sesiune_id, client_mem, GEMINI_MODEL),
                 daemon=True,
             ).start()
         except Exception as e:
@@ -261,7 +263,20 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
 
 
 # ---- Pornire ----
+def _la_schimbare_ecran():
+    """
+    Callback apelat de monitor_ecran.py când detectează o schimbare
+    vizuală locală confirmată. Face UN singur apel API (analiza de
+    alertă) și, doar dacă e relevant, te anunță — altfel tace complet.
+    """
+    relevant, mesaj = analizeaza_pentru_alerta()
+    if relevant and mesaj:
+        print(f"\n🔔 [Jarvis observă]: {mesaj}\nTu: ", end="", flush=True)
+
+
+# ---- Pornire ----
 porneste_thread_watcher()
+porneste_monitorizare_ecran(_la_schimbare_ecran)
 istoric = []
 sesiune_id = db.incepe_sesiune()
 

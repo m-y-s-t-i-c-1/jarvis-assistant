@@ -249,3 +249,71 @@ def gaseste_pe_ecran(element: str):
 
     eticheta = date.get("eticheta", element)
     return f"Găsit: '{eticheta}' — centru la ({centru_x}, {centru_y}), colț stânga-sus ({px_x_min}, {px_y_min}), colț dreapta-jos ({px_x_max}, {px_y_max})."
+
+
+# ==============================================================
+# ANALIZĂ PENTRU ALERTĂ PROACTIVĂ (folosită de monitor_ecran.py)
+# ==============================================================
+# NU e @unealta — Gemini nu o alege din conversație. E chemată direct de
+# monitor_ecran.py (Task 6.5), în fundal, când detectează o schimbare
+# vizuală locală (fără cost API) și vrea să decidă dacă merită să te
+# deranjeze cu o notificare.
+
+_PROMPT_ALERTA = """Analizează acest screenshot al ecranului utilizatorului.
+
+Există ceva ce necesită ATENȚIA LUI IMEDIATĂ? De exemplu:
+- un mesaj de eroare sau crash
+- un dialog/pop-up care așteaptă un răspuns (confirmare, alertă de sistem)
+- un mesaj important vizibil într-o aplicație de chat/email
+- orice altceva neobișnuit care pare să necesite intervenție
+
+Ignoră complet: activitate normală de lucru (scris cod, navigare, citit),
+ferestre deschise fără evenimente noi, activitate de rutină.
+
+Returnează DOAR un JSON valid (fără markdown):
+{"relevant": true/false, "mesaj": "descriere scurtă, o propoziție, doar dacă relevant=true"}
+"""
+
+
+def analizeaza_pentru_alerta() -> tuple[bool, str]:
+    """
+    Analizează ecranul curent și decide dacă merită o notificare proactivă.
+
+    Returnează (relevant, mesaj):
+        - (True, "text scurt")  dacă a găsit ceva ce merită atenție
+        - (False, "")           altfel, sau dacă analiza a eșuat
+
+    Eșecurile sunt tratate silențios (returnează False) — o alertă ratată
+    ocazional e mult mai puțin gravă decât un crash al thread-ului de
+    monitorizare din monitor_ecran.py.
+    """
+    try:
+        img_bytes, _, _ = _screenshot_bytes()
+    except Exception as e:
+        print(f"[Vedere] Eroare screenshot pentru alertă: {e}")
+        return False, ""
+
+    try:
+        raspuns = _genereaza_cu_fallback(
+            model=GEMINI_MODEL_VEDERE,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_bytes(data=img_bytes, mime_type="image/png"),
+                        types.Part(text=_PROMPT_ALERTA),
+                    ],
+                )
+            ],
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
+        text = (raspuns.text or "").strip()
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        date = json.loads(text.strip())
+        return bool(date.get("relevant")), str(date.get("mesaj", "")).strip()
+    except Exception as e:
+        print(f"[Vedere] Eroare la analiza de alertă: {e}")
+        return False, ""
