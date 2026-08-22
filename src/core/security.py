@@ -1,11 +1,15 @@
 """
-Barierele de Securitate și Validarea (Task 2.3)
+Barierele de Securitate și Validarea (Task 2.3) + Git Safety Net (Task 6.7)
 
-Două straturi de protecție:
+Trei straturi de protecție:
 1. BLACKLIST: pattern-uri de argumente care sunt blocate complet, indiferent
    de context. Niciodată nu ajung la subprocess.
 2. CONFIRMARE: unelte marcate cu necesita_confirmare=True în @unealta cer
    aprobare explicită înainte de execuție.
+3. GIT SAFETY NET (nou): chiar înainte de a aproba o acțiune care necesită
+   confirmare, creăm automat un checkpoint Git neintruziv (git_safety.py).
+   Dacă acțiunea aprobată strică ceva, ai un punct de recuperare, fără să
+   fi cerut tu explicit asta.
 
 Confirmarea are două moduri, comutabile din CONFIRMATION_MODE:
    - TEXT  (activ acum): întreabă în terminal, aștepți 'da'/'nu'
@@ -17,6 +21,7 @@ Când implementezi Faza 3, caută comentariul "FAZA 3:" din această clasă
 
 import re
 from enum import Enum
+from src.core.git_safety import creeaza_checkpoint
 
 # ---- Modul de confirmare activ ----
 # Schimbă asta în VOICE când implementezi Faza 3 audio
@@ -41,7 +46,7 @@ BLACKLIST_PATTERNS = [
     r"chmod\s+-R\s+777",       # permisiuni globale nesigure
     r"chown\s+-R.*root",       # schimbare owner la root recursiv
     r"sudo\s+rm",              # rm cu sudo
-    r"shutdown",               # oprire sistem
+    r"shutdown",                # oprire sistem
     r"reboot",                 # restart sistem
     r"halt",                   # oprire hard
     r"poweroff",               # oprire sistem
@@ -61,6 +66,18 @@ BLACKLIST_PATTERNS = [
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel
 _BLACKLIST_COMPILED = [re.compile(p, re.IGNORECASE) for p in BLACKLIST_PATTERNS]
+
+# ---- Unelte pentru care Git Safety Net-ul NU are sens ----
+# Checkpoint-ul Git protejează fișierele din repo — n-are rost să facem
+# un `git stash create` înainte de acțiuni care nu ating deloc filesystem-ul
+# repo-ului (ex: click pe ecran, ștergere eveniment din Google Calendar).
+# Îl păstrăm activ pentru orice altceva marcat necesita_confirmare=True,
+# ca plasă implicită — mai bine un checkpoint în plus, nederanjant, decât
+# unul lipsă exact când ai avea nevoie de el.
+_FUNCTII_FARA_SAFETY_NET = {
+    "click_la_pozitie", "scrie_text", "apasa_tasta",
+    "sterge_eveniment", "creeaza_eveniment",
+}
 
 
 def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
@@ -130,6 +147,13 @@ def trece_prin_securitate(
     Punctul unic de intrare pentru toate verificările de securitate.
     Apelat din agent.py înainte de orice ruleaza_functie().
 
+    Ordinea pașilor:
+        1. Blacklist — blocare imediată, fără confirmare
+        2. Confirmare explicită (dacă unealta e marcată)
+        3. Git Safety Net — checkpoint automat, DUPĂ ce utilizatorul a
+           aprobat, chiar înainte de execuția efectivă. Neintruziv,
+           silențios — nu cere el însuși nicio confirmare.
+
     Returnează:
         (True, "")       -> execuție aprobată, continuă normal
         (False, motiv)   -> execuție blocată, motiv e trimis înapoi la model
@@ -144,5 +168,10 @@ def trece_prin_securitate(
         aprobat = cere_confirmare(nume_functie, argumente)
         if not aprobat:
             return False, f"Utilizatorul a refuzat execuția funcției '{nume_functie}'."
+
+        # Pasul 3: Git Safety Net — checkpoint automat, silențios, doar
+        # pentru acțiuni unde chiar are sens (nu ating repo-ul altfel)
+        if nume_functie not in _FUNCTII_FARA_SAFETY_NET:
+            creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})")
 
     return True, ""

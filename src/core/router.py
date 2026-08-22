@@ -77,3 +77,36 @@ def clasifica(text: str) -> str:
         return "cod"
 
     return "conversatie"
+
+
+# Răspunsuri scurte care de obicei CONTINUĂ o conversație anterioară
+# (confirmare/refuz/ambiguu), nu deschid un subiect nou. Dacă router-ul
+# le-ar clasifica independent, "da" (fără cuvinte cheie) ar cădea mereu
+# pe "conversatie" — chiar dacă răspunde la o întrebare de confirmare
+# pusă de Gemini pe calea "unelte" (ex: git commit). Rezultatul ar fi
+# ruperea fluxului de tool-calling la jumătate, cu risc de halucinație
+# pe partea de fallback (NVIDIA/Groq nu au unelte reale).
+_RASPUNSURI_SCURTE = (
+    "da", "nu", "ok", "okay", "sigur", "confirm", "confirmă", "confirma",
+    "anulează", "anuleaza", "renunță", "renunta", "continuă", "continua",
+    "stop", "oprește", "opreste", "gata", "bine", "corect", "exact",
+)
+
+
+def este_raspuns_scurt_de_continuare(text: str) -> bool:
+    """
+    True dacă mesajul e scurt (≤4 cuvinte) și pare o continuare/confirmare
+    a schimbului anterior, nu o cerere nouă și independentă.
+
+    Folosit de main.py ca să decidă dacă păstrează categoria din tura
+    precedentă ("routare sticky"), în loc să reclasifice de la zero —
+    esențial pentru fluxuri de confirmare (ex: "fă un commit" -> Jarvis
+    întreabă ceva -> "da" trebuie să ajungă tot la Gemini, nu la NVIDIA).
+    """
+    text_curat = text.strip().lower().rstrip("!?.,")
+    cuvinte = text_curat.split()
+
+    if len(cuvinte) > 4:
+        return False
+
+    return any(cuvant in text_curat for cuvant in _RASPUNSURI_SCURTE)

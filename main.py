@@ -15,7 +15,7 @@ from src.core.database import db
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.consolidare import consolidare
-from src.core.router import clasifica
+from src.core.router import clasifica, este_raspuns_scurt_de_continuare
 from src.core.monitor_ecran import porneste_monitorizare_ecran
 from src.tools.vedere import analizeaza_pentru_alerta
 from src.core.llm_provider import (
@@ -163,6 +163,33 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
     )
 
 
+# Ține minte categoria ultimei cereri, pentru "routare sticky" — un
+# răspuns scurt de continuare ("da", "nu", "ok") nu se reclasifică de la
+# zero, moștenește categoria turei precedente. Fără asta, o confirmare
+# pentru o acțiune Gemini (ex: git commit) putea "sări" pe NVIDIA, care
+# nu are unelte reale și halucinează că a executat acțiunea. (Task 6.7)
+_ultima_categorie: str = "unelte"  # implicit "unelte" — cea mai sigură presupunere inițială
+
+# System prompt separat pentru NVIDIA (fallback text, FĂRĂ unelte reale).
+# NU folosim SYSTEM_PROMPT_BAZA direct — acela spune explicit "poți
+# controla sistemul... prin uneltele disponibile", ceea ce l-a făcut pe
+# NVIDIA să halucineze că a executat un git commit care nu s-a întâmplat
+# niciodată. Aici îi spunem clar opusul.
+AVERTISMENT_NVIDIA_FARA_UNELTE = """IMPORTANT — citește cu atenție înainte să răspunzi:
+În acest mod NU ai acces la nicio unealtă reală. NU poți rula comenzi, NU poți
+face commit-uri Git, NU poți controla sistemul, ecranul sau orice altceva.
+Ești strict un model de conversație/cunoștințe generale, fără capacitate de
+acțiune.
+
+NU pretinde NICIODATĂ, sub nicio formă, că ai executat o acțiune reală
+(fișiere, comenzi de sistem, Git, aplicații etc.) — asta ar fi o informație
+falsă transmisă lui Vasea.
+
+Dacă cererea lui pare să necesite o acțiune reală, spune-i CLAR și DIRECT că
+cererea asta trebuie procesată de asistentul principal (cu unelte), nu te
+preface că ai făcut-o tu."""
+
+
 def _ultimul_mesaj_utilizator(istoric: list) -> str:
     """Extrage textul ultimului mesaj de tip user din istoric, pentru clasificare."""
     if not istoric:
@@ -186,15 +213,30 @@ def ruleaza_cu_fallback(istoric: list, system_prompt: str) -> str:
 
     Pentru "cod"/"conversatie", dacă NVIDIA specializat eșuează, cade pe
     calea completă Gemini -> Groq -> cascada finală (_ruleaza_gemini_apoi_restul).
+
+    Routare sticky (Task 6.7): un răspuns scurt de continuare ("da", "nu",
+    "ok" etc.) moștenește categoria turei precedente, în loc să fie
+    reclasificat independent — previne ruperea unui flux de confirmare
+    Gemini (ex: git commit) la jumătate, către un provider fără unelte.
     """
+    global _ultima_categorie
+
     text_cerere = _ultimul_mesaj_utilizator(istoric)
-    categorie = clasifica(text_cerere)
-    print(f"[Router] Cerere clasificată drept: '{categorie}'")
+
+    if este_raspuns_scurt_de_continuare(text_cerere):
+        categorie = _ultima_categorie
+        print(f"[Router] Răspuns scurt de continuare — păstrez categoria anterioară: '{categorie}'")
+    else:
+        categorie = clasifica(text_cerere)
+        print(f"[Router] Cerere clasificată drept: '{categorie}'")
+
+    _ultima_categorie = categorie
 
     if categorie == "unelte":
         return _ruleaza_gemini_apoi_restul(istoric, system_prompt)
 
-    mesaje_openai = istoric_la_mesaje_openai(istoric, system_prompt)
+    system_prompt_nvidia = AVERTISMENT_NVIDIA_FARA_UNELTE + "\n\n" + system_prompt
+    mesaje_openai = istoric_la_mesaje_openai(istoric, system_prompt_nvidia)
 
     if categorie == "cod":
         rezultat = intreaba_nvidia_cod(mesaje_openai)
@@ -205,6 +247,7 @@ def ruleaza_cu_fallback(istoric: list, system_prompt: str) -> str:
         return rezultat
 
     print(f"[NVIDIA indisponibil pentru categoria '{categorie}' — trec pe Gemini]")
+    _ultima_categorie = "unelte"
     return _ruleaza_gemini_apoi_restul(istoric, system_prompt)
 
 

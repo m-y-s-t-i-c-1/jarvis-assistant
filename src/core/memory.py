@@ -1,5 +1,6 @@
 """
 Memoria Episodică (Task 4.4) + Logica de Injecție Dinamică (Task 4.6)
++ Filtrare RAG Selectivă (Task 6.7)
 
 Două responsabilități combinate:
 
@@ -12,10 +13,23 @@ Două responsabilități combinate:
    întâmplat în sesiunile anterioare.
 
 Tipuri de memorie:
-    fapt       — informații obiective despre utilizator sau proiect
-    preferinta — cum preferă Vasea să lucreze sau să primească răspunsuri
-    context    — starea curentă a unui proiect sau task
-    corectie   — când Vasea a corectat o eroare a lui Jarvis
+    fapt                — informații obiective despre utilizator sau proiect
+    preferinta          — cum preferă Vasea să lucreze sau să primească răspunsuri
+    context             — starea curentă a unui proiect sau task
+    corectie            — când Vasea a corectat o eroare a lui Jarvis
+    cod_validat         — (nou, Task 6.7) un snippet de cod confirmat funcțional
+    decizie_arhitectura — (nou, Task 6.7) o decizie de design/arhitectură luată
+    eroare_rezolvata     — (nou, Task 6.7) o eroare identificată ȘI rezolvată,
+                           cu cauza și fix-ul, utilă pentru probleme similare
+                           viitoare
+
+Filtrare selectivă (Task 6.7, "Memoria RAG Selectivă" din arhitectură):
+    NU salvăm orice frază — doar informații cu valoare reală de reutilizare.
+    Categoriile noi (cod_validat, decizie_arhitectura, eroare_rezolvata) au
+    prag de lungime mai mare (trebuie să conțină substanță reală, nu doar
+    o mențiune în trecere) și sunt cele mai relevante pentru un asistent de
+    dezvoltare — pragul vechi (>10 caractere) era prea permisiv, salva
+    aproape orice.
 
 Utilizare în main.py:
     # La pornire — injectăm amintirile în system prompt
@@ -34,22 +48,41 @@ from src.core.database import db
 # Câte amintiri injectăm în system prompt (cele mai relevante)
 MAX_AMINTIRI_INJECTATE = 10
 
+# Prag minim de caractere per categorie — categoriile "grele" (cod, decizii,
+# erori rezolvate) cer substanță reală, nu o mențiune de o propoziție.
+PRAG_LUNGIME = {
+    "fapt": 10,
+    "preferinta": 10,
+    "context": 10,
+    "corectie": 10,
+    "cod_validat": 25,
+    "decizie_arhitectura": 20,
+    "eroare_rezolvata": 20,
+}
+
 # Promptul pentru extragerea automată de fapte din conversație
 PROMPT_EXTRACTIE = """Analizează acest schimb de conversație și extrage informații importante
-despre utilizatorul numit Vasea sau despre contextul de lucru.
+despre utilizatorul numit Vasea sau despre contextul de lucru (proiectul lui Jarvis).
 
 Returnează DOAR un JSON valid cu această structură (fără markdown, fără explicații):
 {{
   "fapte": ["fapt obiectiv 1", "fapt obiectiv 2"],
   "preferinte": ["preferinta 1", "preferinta 2"],
   "context": ["context tehnic sau de proiect relevant"],
-  "corectii": ["corecție dacă Vasea a corectat ceva"]
+  "corectii": ["corecție dacă Vasea a corectat ceva"],
+  "cod_validat": ["snippet sau descriere de cod CONFIRMAT funcțional, cu destul context ca să fie reutilizabil"],
+  "decizii_arhitectura": ["o decizie de design/arhitectură luată explicit în discuție, cu motivul ei"],
+  "erori_rezolvate": ["o eroare identificată ȘI rezolvată: ce era, de ce, cum s-a reparat"]
 }}
 
 Reguli stricte:
 - Dacă nu există informații pentru o categorie, lasă lista goală [].
 - Extrage DOAR informații noi, concrete și utile pentru conversații viitoare.
 - Ignoră saluturile, întrebările banale și răspunsurile generice.
+- Pentru cod_validat/decizii_arhitectura/erori_rezolvate: extrage DOAR dacă
+  informația e completă și substanțială (nu o mențiune vagă în trecere) —
+  aceste categorii sunt pentru cunoștințe reutilizabile de valoare mare,
+  nu pentru orice frază tehnică rostită în conversație.
 - Maximum 2-3 elemente per categorie.
 
 Conversație:
@@ -71,9 +104,11 @@ class ManagerMemorie:
         model: str = "gemini-3.6-flash",
     ) -> int:
         """
-        Trimite conversația la Gemini, extrage fapte/preferințe/context
-        și le salvează în DB. Apelat după fiecare răspuns al lui Jarvis.
+        Trimite conversația la Gemini, extrage fapte/preferințe/context/
+        cod-validat/decizii/erori-rezolvate și le salvează în DB, cu
+        filtrare selectivă (Task 6.7) — nu orice frază ajunge în RAG.
 
+        Apelat după fiecare răspuns al lui Jarvis.
         Returnează numărul de amintiri salvate.
         """
         prompt = PROMPT_EXTRACTIE.format(
@@ -107,25 +142,35 @@ class ManagerMemorie:
 
         salvate = 0
         tip_map = {
-            "fapte":      "fapt",
-            "preferinte": "preferinta",
-            "context":    "context",
-            "corectii":   "corectie",
+            "fapte":               "fapt",
+            "preferinte":          "preferinta",
+            "context":             "context",
+            "corectii":            "corectie",
+            "cod_validat":         "cod_validat",
+            "decizii_arhitectura": "decizie_arhitectura",
+            "erori_rezolvate":     "eroare_rezolvata",
         }
 
         for cheie, tip in tip_map.items():
+            prag = PRAG_LUNGIME.get(tip, 10)
             for item in date.get(cheie, []):
-                if item and len(item.strip()) > 10:  # ignorăm string-uri prea scurte
+                # Filtrare selectivă: sub prag = ignorat, chiar dacă Gemini
+                # l-a extras — categoriile "grele" cer substanță reală.
+                if item and len(item.strip()) > prag:
+                    # Categoriile noi (mare valoare) pornesc cu relevanță
+                    # maximă, ca să nu fie degradate/șterse prematur de
+                    # consolidare.py față de fapte/preferințe obișnuite.
+                    relevanta_initiala = 1.0
                     db.salveaza_memorie(
                         tip=tip,
                         continut=item.strip(),
                         sursa=sesiune_id,
-                        relevanta=1.0,
+                        relevanta=relevanta_initiala,
                     )
                     salvate += 1
 
         if salvate:
-            print(f"[Memorie] {salvate} amintiri noi salvate.")
+            print(f"[Memorie] {salvate} amintiri noi salvate (filtrare selectivă aplicată).")
 
         return salvate
 
@@ -153,10 +198,13 @@ class ManagerMemorie:
             pe_tip[tip].append(a["continut"])
 
         etichete = {
-            "fapt":       "Fapte",
-            "preferinta": "Preferințe",
-            "context":    "Context tehnic",
-            "corectie":   "Corecții anterioare",
+            "fapt":                 "Fapte",
+            "preferinta":           "Preferințe",
+            "context":              "Context tehnic",
+            "corectie":             "Corecții anterioare",
+            "cod_validat":          "Cod validat/reutilizabil",
+            "decizie_arhitectura":  "Decizii de arhitectură",
+            "eroare_rezolvata":     "Erori rezolvate anterior",
         }
 
         for tip, eticheta in etichete.items():
@@ -199,7 +247,6 @@ memorie = ManagerMemorie()
 if __name__ == "__main__":
     print("\n=== Test ManagerMemorie ===\n")
 
-    # Test bloc amintiri din DB (cele salvate în testele anterioare)
     bloc = memorie.bloc_amintiri()
     if bloc:
         print("Amintiri existente în DB:")
@@ -207,7 +254,6 @@ if __name__ == "__main__":
     else:
         print("Nicio amintire în DB încă.")
 
-    # Test construire system prompt complet
     SYSTEM_PROMPT_TEST = "Tu ești Jarvis, asistentul lui Vasea."
     prompt_complet = memorie.construieste_system_prompt(SYSTEM_PROMPT_TEST)
     print(f"\nSystem prompt complet ({len(prompt_complet)} caractere):")
