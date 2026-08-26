@@ -6,10 +6,15 @@ lui Jarvis în audio redat prin boxe. Piper scrie WAV într-un fișier temporar
 (are nevoie de seek() pentru a scrie headerul), pe care îl citim și redăm
 prin sounddevice, apoi îl ștergem.
 
+Task 6.10 — redare prin echo-cancel-sink: dacă modulul PipeWire de anulare
+ecou e configurat (vezi audio_io.py), redarea trece prin DEVICE_REDARE_DIFUZOARE
+("echo-cancel-sink") în loc de device-ul implicit — necesar ca modulul să
+aibă semnalul de referință pentru anularea ecoului în timpul barge-in.
+
 Arhitectură:
     spune(text) — funcția principală, apelată din orchestratorul audio (Task 3.5)
     _reda_wav_bytes(bytes) — parsează headerul WAV și redă audio-ul prin sounddevice
-    opreste() — întrerupe redarea curentă (pentru barge-in, Task 3.7)
+    opreste() — întrerupe redarea curentă (pentru barge-in, Task 3.7 / 6.10)
 
 Configurare în .env (opțional):
     PIPER_BINARY   — calea către executabilul piper (default: piper)
@@ -22,12 +27,16 @@ import wave
 import tempfile
 import threading
 import subprocess
+import shutil
+import time
+from src.core import audio_player
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 from dotenv import load_dotenv
 
-from src.core.audio_io import DEVICE_IMPLICIT
+from src.core.audio_io import DEVICE_REDARE_DIFUZOARE, _OPEN_CLOSE_LOCK
 
 load_dotenv()
 
@@ -35,17 +44,62 @@ load_dotenv()
 PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
 PIPER_MODEL  = os.getenv("PIPER_MODEL", "voci_piper/ro_RO-mihai-medium.onnx")
 
-# Eveniment pentru oprirea redării în curs (barge-in, Task 3.7)
+# Eveniment pentru oprirea redării în curs (barge-in, Task 3.7/6.10)
 _stop_event = threading.Event()
 
 # Lock ca să nu pornească două redări simultan
 _redare_lock = threading.Lock()
 
 
+def _reesantioneaza(audio: np.ndarray, rata_sursa: int, rata_tinta: int) -> np.ndarray:
+    """
+    Reeșantionare cu filtrare anti-aliasing folosind `resample_poly`.
+
+    Suportă audio mono (1D) sau multi-canal (2D, shape (n, canale)).
+    """
+    if rata_sursa == rata_tinta or len(audio) == 0:
+        return audio.astype(np.float32)
+
+    up = rata_tinta
+    down = rata_sursa
+
+    # `resample_poly` lucrează pe axis=0; suportă array 1D sau 2D direct
+    try:
+        res = resample_poly(audio, up, down, axis=0).astype(np.float32)
+    except Exception:
+        # Fallback la interpolare liniară dacă ceva e în neregulă
+        if audio.ndim == 1:
+            n_esantioane_noi = max(1, int(len(audio) * rata_tinta / rata_sursa))
+            indici_noi = np.linspace(0, len(audio) - 1, n_esantioane_noi)
+            indici_vechi = np.arange(len(audio))
+            res = np.interp(indici_noi, indici_vechi, audio).astype(np.float32)
+        else:
+            n_esantioane_noi = max(1, int(audio.shape[0] * rata_tinta / rata_sursa))
+            indici_noi = np.linspace(0, audio.shape[0] - 1, n_esantioane_noi)
+            indici_vechi = np.arange(audio.shape[0])
+            canale_resample = [
+                np.interp(indici_noi, indici_vechi, audio[:, c])
+                for c in range(audio.shape[1])
+            ]
+            res = np.stack(canale_resample, axis=1).astype(np.float32)
+
+    return res
+
+
 def _reda_wav_bytes(wav_bytes: bytes) -> None:
     """
-    Parsează un blob WAV din memorie și îl redă prin sounddevice.
+    Parsează un blob WAV din memorie și îl redă prin sounddevice, pe
+    DEVICE_REDARE_DIFUZOARE (echo-cancel-sink dacă e disponibil).
     Blochează până se termină redarea SAU până _stop_event e setat.
+
+    IMPORTANT: device-urile virtuale PipeWire (ex: echo-cancel-sink) au
+    adesea o rată de eșantionare FIXĂ (setată la crearea filtrului),
+    spre deosebire de device-ul generic "pipewire", care face resampling
+    automat la orice rată. Piper generează frecvent la 22050 Hz — dacă
+    rata WAV-ului nu se potrivește cu rata nativă a device-ului, PortAudio
+    aruncă "Invalid sample rate" direct la deschiderea stream-ului. Ca să
+    evităm asta, reeșantionăm manual înainte de redare, la rata nativă a
+    device-ului curent.
     """
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         sample_rate  = wf.getframerate()
@@ -62,22 +116,66 @@ def _reda_wav_bytes(wav_bytes: bytes) -> None:
         audio = audio.reshape(-1, n_canale)
 
     audio_f32 = audio.astype(np.float32) / np.iinfo(dtype).max
+    # Creăm un fișier temporar WAV și încercăm să-l redăm cu un player extern
+    # (paplay sau aplay) înainte de a folosi PortAudio, pentru a evita crash-urile
+    # cunoscute în anumite combinații libportaudio/driver.
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+            tf.write(wav_bytes)
+            tmp_path = tf.name
 
-    BLOC = 4096
-    idx = 0
+        # Încercăm `paplay` (PulseAudio/PipeWire friendly), apoi `aplay` ca fallback
+        player = shutil.which("paplay") or shutil.which("aplay")
+        if player:
+            try:
+                proc = subprocess.Popen([player, tmp_path])
+                # Așteptăm terminarea player-ului sau eventul de stop
+                while proc.poll() is None and not _stop_event.is_set():
+                    time.sleep(0.05)
 
-    with sd.OutputStream(
-        samplerate=sample_rate,
-        channels=n_canale,
-        dtype="float32",
-        device=DEVICE_IMPLICIT,
-    ) as stream:
-        while idx < len(audio_f32) and not _stop_event.is_set():
-            bloc = audio_f32[idx : idx + BLOC]
-            if bloc.ndim == 1:
-                bloc = bloc.reshape(-1, 1)
-            stream.write(bloc)
-            idx += BLOC
+                if _stop_event.is_set() and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        proc.kill()
+                return
+            except FileNotFoundError:
+                # Nu găsim player-ul; cădem în fallback la sounddevice
+                pass
+
+        # Dacă nu avem player extern sau elșuie, folosim player-ul persistent
+        # care păstrează un OutputStream deschis (reduce riscul deschiderilor/închiderilor repetate)
+        try:
+            audio_player.play_blocking(audio_f32, sample_rate, _stop_event)
+            return
+        except Exception as e:
+            print(f"[TTS] Player persistent a eșuat: {e} — încerc fallback sounddevice/paplay")
+
+        # Verificăm rata nativă a device-ului de redare și reeșantionăm dacă diferă
+        try:
+            info_device = sd.query_devices(DEVICE_REDARE_DIFUZOARE)
+            rata_device = int(info_device["default_samplerate"])
+            if rata_device != sample_rate:
+                audio_f32 = _reesantioneaza(audio_f32, sample_rate, rata_device)
+                sample_rate = rata_device
+        except Exception as e:
+            print(f"[TTS] Nu am putut verifica rata device-ului, redau la rata originală: {e}")
+
+        # Fallback final: try sd.play (serialized open/close)
+        try:
+            with _OPEN_CLOSE_LOCK:
+                sd.play(audio_f32, samplerate=sample_rate, device=DEVICE_REDARE_DIFUZOARE)
+                sd.wait()
+        except Exception as e2:
+            print(f"[TTS] sd.play a eșuat: {e2}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def spune(text: str) -> None:
@@ -141,7 +239,7 @@ def spune(text: str) -> None:
 def opreste() -> None:
     """
     Oprește redarea vocii în curs.
-    Apelat din Task 3.7 (barge-in) când utilizatorul începe să vorbească.
+    Apelat din Task 3.7/6.10 (barge-in) când utilizatorul începe să vorbească.
     """
     _stop_event.set()
 

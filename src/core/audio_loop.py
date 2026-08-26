@@ -1,13 +1,22 @@
 """
-Orchestratorul Audio (Task 3.5)
+Orchestratorul Audio (Task 3.5) + Streaming propoziție-cu-propoziție (Task 6.9)
 
 Leagă toate modulele din Faza 3 într-o buclă continuă:
 
     1. VAD     — ascultă microfonul, detectează când vorbești
     2. STT     — transcrie ce ai spus (Whisper)
-    3. Agent   — trimite textul la Gemini, primește răspuns
-    4. TTS     — redă răspunsul prin boxe (Piper)
+    3. Agent   — trimite textul la Gemini, STREAMEAZĂ răspunsul
+    4. TTS     — vorbește FIECARE PROPOZIȚIE imediat ce e gata, nu așteaptă
+                 tot răspunsul (Task 6.9 — "vorbește pe măsură ce gândește")
     5. repeat  — revine la pasul 1
+
+Diferență față de versiunea anterioară: în loc de
+    raspuns_text = agent_loop(...); spune(raspuns_text)
+folosim
+    raspuns_text = agent_loop_streaming(..., la_propozitie_gata=spune)
+Jarvis începe să vorbească la prima propoziție completă generată, în loc
+să aștepte tot răspunsul — latență percepută mult mai mică în conversație
+vocală.
 
 Comenzi vocale speciale (recunoscute după transcriere):
     "exit" / "stop" / "ieși" / "oprește-te"  — închide bucla vocală
@@ -27,6 +36,7 @@ Rulare din main.py (integrat):
 
 import os
 import time
+import threading
 import itertools
 from dotenv import load_dotenv
 from google import genai
@@ -34,8 +44,9 @@ from google.genai import types
 
 from src.core.vad import obtine_detector
 from src.core.stt import transcrie
-from src.core.tts import spune, opreste
-from src.core.agent import agent_loop
+from src.core.tts import spune
+from src.core.barge_in import vorbeste_cu_intrerupere
+from src.core.agent import agent_loop_streaming
 from src import tools  # noqa: F401 — înregistrează toate uneltele
 
 load_dotenv()
@@ -84,10 +95,13 @@ Reguli de comportament:
 - Ești proactiv: dacă observi o problemă sau o soluție mai bună, o menționezi.
 - Nu ești servil sau exagerat de politicos — ești un consilier de încredere.
 - Vorbești în limba română, cu un vocabular elevat dar natural.
-- IMPORTANT pentru modul vocal: răspunsurile tale vor fi ROSTITE cu voce tare.
-  Evită listele cu puncte, simbolurile speciale (*, #, →), URL-uri lungi și
-  orice formatare Markdown — acestea sună ciudat când sunt citite cu voce tare.
-  Formulează răspunsuri ca propoziții naturale, de parcă vorbești cu cineva.
+- IMPORTANT pentru modul vocal: răspunsurile tale vor fi ROSTITE cu voce tare,
+  PROPOZIȚIE CU PROPOZIȚIE, pe măsură ce le generezi. Evită listele cu puncte,
+  simbolurile speciale (*, #, →), URL-uri lungi și orice formatare Markdown —
+  acestea sună ciudat când sunt citite cu voce tare. Formulează propoziții
+  scurte și complete — fiecare propoziție e rostită imediat ce o termini,
+  deci evită propoziții foarte lungi cu multe virgule, care ar întârzia
+  momentul în care începi să vorbești.
 - Nu ai cunoștințe proprii despre ora sau data curentă. Folosește uneltele disponibile.
 """
 
@@ -98,7 +112,7 @@ def porneste_bucla_audio(
     model: str = "gemini-3.6-flash",
 ) -> None:
     """
-    Pornește bucla audio continuă VAD → STT → Agent → TTS.
+    Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
 
     Parametri:
         istoric:          lista de mesaje existentă (din main.py), sau None
@@ -147,7 +161,7 @@ def porneste_bucla_audio(
             spune(raspuns_oprire)
             break
 
-        # ── Pasul 3: Agent — trimitem la Gemini ──────────────────────────
+        # ── Pasul 3+4: Agent (streaming) + TTS pe măsură ce vine ─────────
         print(INDICATOR["gandesc"])
         istoric.append(
             types.Content(
@@ -156,21 +170,43 @@ def porneste_bucla_audio(
             )
         )
 
+        print(INDICATOR["vorbesc"])
+        raspuns_complet_afisat = []
+        flag_intrerupere = threading.Event()
+
+        def _la_propozitie(propozitie: str):
+            """
+            Callback trimis la agent_loop_streaming: vorbește propoziția
+            IMEDIAT prin vorbeste_cu_intrerupere (Task 6.10 — ascultă
+            concurent pentru barge-in). Dacă utilizatorul vorbește peste
+            Jarvis, setăm flag_intrerupere — agent_loop_streaming îl
+            verifică și oprește generarea propozițiilor următoare, nu
+            doar redarea celei curente.
+            """
+            raspuns_complet_afisat.append(propozitie)
+            print(f"Jarvis: {propozitie}")
+
+            a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
+            if a_fost_intrerupt:
+                flag_intrerupere.set()
+
         try:
             client_curent = next(rotatie_clienti)
-            raspuns_text = agent_loop(client_curent, model, SYSTEM_PROMPT, istoric)
+            raspuns_text = agent_loop_streaming(
+                client_curent, model, SYSTEM_PROMPT, istoric,
+                la_propozitie_gata=_la_propozitie,
+                flag_intrerupere=flag_intrerupere,
+            )
         except Exception as e:
             raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
             print(f"[EROARE agent]: {e}")
-
-        print(f"Jarvis: {raspuns_text}")
-
-        # ── Pasul 4: TTS — rostim răspunsul ──────────────────────────────
-        print(INDICATOR["vorbesc"])
-        try:
             spune(raspuns_text)
-        except RuntimeError as e:
-            print(f"[EROARE TTS]: {e}")
+
+        if flag_intrerupere.is_set():
+            print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")
+            # Fără pauză aici — vrem să captăm cât mai repede ce spune Vasea,
+            # exact motivul pentru care a întrerupt.
+            continue
 
         # Pauză scurtă între sfârșit redare și reluarea ascultării,
         # ca să nu captăm ecoul propriei voci (mai ales fără căști)

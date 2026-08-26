@@ -259,39 +259,59 @@ def gaseste_pe_ecran(element: str):
 # vizuală locală (fără cost API) și vrea să decidă dacă merită să te
 # deranjeze cu o notificare.
 
-_PROMPT_ALERTA = """Analizează acest screenshot al ecranului utilizatorului.
+_PROMPT_ALERTA = """Analizează acest screenshot al ecranului utilizatorului (numit Vasea).
+Ești Jarvis — asistentul lui AI, cu personalitate calmă, profesionistă, cu
+un strop de umor sec britanic (gen Jarvis din Iron Man).
 
-Există ceva ce necesită ATENȚIA LUI IMEDIATĂ? De exemplu:
-- un mesaj de eroare sau crash
-- un dialog/pop-up care așteaptă un răspuns (confirmare, alertă de sistem)
-- un mesaj important vizibil într-o aplicație de chat/email
-- orice altceva neobișnuit care pare să necesite intervenție
+Clasifică ce vezi în UNA din trei categorii:
 
-Ignoră complet: activitate normală de lucru (scris cod, navigare, citit),
-ferestre deschise fără evenimente noi, activitate de rutină.
+1. "urgent" — ceva ce necesită atenția lui IMEDIATĂ:
+   - mesaj de eroare sau crash
+   - dialog/pop-up de sistem sau al unei aplicații care așteaptă un răspuns
+   - mesaj important vizibil într-o aplicație de chat/email
+   - orice altceva neobișnuit care pare să necesite intervenție
+
+2. "comentariu" — NU e urgent, dar merită o remarcă scurtă, witty, în
+   personajul tău (Jarvis) — ex: un test care tocmai a trecut, un commit
+   reușit, ceva amuzant sau notabil vizibil pe ecran, un moment de progres
+   clar în muncă. Folosește asta RAR și doar când chiar ai ceva de spus,
+   nu pentru orice fereastră deschisă.
+
+3. "nimic" — activitate normală de rutină (scris cod, navigare, citit),
+   fără nimic notabil în niciuna din categoriile de mai sus.
+
+Ignoră ÎNTOTDEAUNA:
+- promptul de confirmare "[da/nu]" din terminalul Jarvis însuși (linia
+  care începe cu "⚠️ Jarvis dorește să execute..."), sau orice text produs
+  chiar de Jarvis în conversația cu utilizatorul — Vasea e deja implicat
+  activ în acea conversație, nu are nevoie de o alertă separată
 
 Returnează DOAR un JSON valid (fără markdown):
-{"relevant": true/false, "mesaj": "descriere scurtă, o propoziție, doar dacă relevant=true"}
+{"tip": "urgent"|"comentariu"|"nimic", "mesaj": "text scurt, o propoziție, doar dacă tip != nimic"}
 """
 
 
-def analizeaza_pentru_alerta() -> tuple[bool, str]:
+def analizeaza_ecran_complet() -> dict:
     """
-    Analizează ecranul curent și decide dacă merită o notificare proactivă.
+    Analizează ecranul curent și clasifică ce vede în "urgent" (alertă,
+    ca înainte), "comentariu" (remarcă de personalitate, non-urgentă) sau
+    "nimic". UN SINGUR apel Gemini, nu dublăm costul API pentru cele două
+    categorii.
 
-    Returnează (relevant, mesaj):
-        - (True, "text scurt")  dacă a găsit ceva ce merită atenție
-        - (False, "")           altfel, sau dacă analiza a eșuat
+    Returnează:
+        {"tip": "urgent"|"comentariu"|"nimic", "mesaj": "..."}
 
-    Eșecurile sunt tratate silențios (returnează False) — o alertă ratată
-    ocazional e mult mai puțin gravă decât un crash al thread-ului de
-    monitorizare din monitor_ecran.py.
+    Eșecurile sunt tratate silențios ({"tip": "nimic", "mesaj": ""}) — o
+    analiză ratată ocazional e mult mai puțin gravă decât un crash al
+    thread-ului de monitorizare din monitor_ecran.py.
     """
+    gol = {"tip": "nimic", "mesaj": ""}
+
     try:
         img_bytes, _, _ = _screenshot_bytes()
     except Exception as e:
-        print(f"[Vedere] Eroare screenshot pentru alertă: {e}")
-        return False, ""
+        print(f"[Vedere] Eroare screenshot pentru analiză: {e}")
+        return gol
 
     try:
         raspuns = _genereaza_cu_fallback(
@@ -313,7 +333,24 @@ def analizeaza_pentru_alerta() -> tuple[bool, str]:
             if text.startswith("json"):
                 text = text[4:]
         date = json.loads(text.strip())
-        return bool(date.get("relevant")), str(date.get("mesaj", "")).strip()
+
+        tip = str(date.get("tip", "nimic")).strip().lower()
+        if tip not in ("urgent", "comentariu", "nimic"):
+            tip = "nimic"
+
+        return {"tip": tip, "mesaj": str(date.get("mesaj", "")).strip()}
     except Exception as e:
-        print(f"[Vedere] Eroare la analiza de alertă: {e}")
-        return False, ""
+        print(f"[Vedere] Eroare la analiza ecranului: {e}")
+        return gol
+
+
+def analizeaza_pentru_alerta() -> tuple[bool, str]:
+    """
+    Păstrată pentru compatibilitate — echivalent cu analizeaza_ecran_complet(),
+    dar returnează doar (relevant, mesaj) pentru categoria "urgent"
+    (comportamentul vechi, dinaintea categoriei "comentariu").
+    """
+    rezultat = analizeaza_ecran_complet()
+    if rezultat["tip"] == "urgent":
+        return True, rezultat["mesaj"]
+    return False, ""

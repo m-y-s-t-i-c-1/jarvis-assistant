@@ -24,7 +24,7 @@ import numpy as np
 import sounddevice as sd
 from openwakeword.model import Model
 
-from src.core.audio_io import SAMPLE_RATE, DEVICE_IMPLICIT
+from src.core.audio_io import SAMPLE_RATE, DEVICE_IMPLICIT, safe_input_stream
 
 # ── Configurare ───────────────────────────────────────────────────────────────
 
@@ -35,7 +35,20 @@ CALE_MODEL = (
 MODEL_CHEIE  = "hey_jarvis_v0.1"
 PRAG_DETECTIE = 0.35
 MARIME_BLOC   = 1280       # 80ms la 16kHz — recomandat de OpenWakeWord
-PAUZA_DUPA_ACTIVARE = 1.5  # secunde de tăcere după ce Jarvis termină de vorbit
+
+# Secunde de tăcere după ce Jarvis termină de vorbit, înainte să
+# redeschidem stream-ul de captură pentru ascultarea pasivă.
+#
+# IMPORTANT (Task 6.8): crescut de la 1.5s la 3.0s — la 1.5s, redeschiderea
+# InputStream-ului venea prea aproape de închiderea stream-ului de redare
+# TTS (Piper, pe PipeWire), cauzând ocazional:
+#   "Unanticipated host error [PaErrorCode -9999]" / erori ALSA mmap.
+# E o instabilitate cunoscută PortAudio/ALSA/PipeWire la tranziții rapide
+# capture<->playback pe același device, nu ceva reparabil complet din
+# Python — 3s dă suficient timp device-ului să se elibereze complet.
+# Dacă tot mai apare eroarea, urcă și mai mult (ex: 4-5s), cu prețul unei
+# reactivări puțin mai lente după fiecare conversație vocală.
+PAUZA_DUPA_ACTIVARE = 3.0
 
 # ── Model (lazy, o singură dată) ─────────────────────────────────────────────
 
@@ -57,7 +70,7 @@ def asteapta_wake_word() -> None:
     """Blochează până detectează 'Hey Jarvis', apoi returnează."""
     model = _obtine_model()
 
-    with sd.InputStream(
+    with safe_input_stream(
         samplerate=SAMPLE_RATE,
         channels=1,
         dtype="int16",

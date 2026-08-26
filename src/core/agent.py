@@ -244,3 +244,188 @@ def agent_loop(
             )
 
     return "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."
+
+
+# ==============================================================
+# VARIANTA STREAMING — pentru modul vocal (Task 6.9)
+# ==============================================================
+# Diferă de agent_loop de mai sus: folosește chat.send_message_stream()
+# în loc de send_message(), și taie textul pe propoziții complete pe
+# măsură ce vine, trimițându-le imediat la TTS — nu se așteaptă tot
+# răspunsul înainte să înceapă vorbirea.
+#
+# Compromisuri asumate față de agent_loop normal:
+#   - NU are plasa anti-halucinație (retry forțat pe function calling) —
+#     ar necesita să aștepte tot răspunsul oricum, anulând beneficiul
+#     de streaming. Pentru conversație vocală fluidă, prioritizăm
+#     latența joasă față de acea plasă suplimentară.
+#   - Generarea și vorbirea NU rulează în paralel (thread-uri separate)
+#     în această versiune — Jarvis generează o propoziție, o rostește,
+#     apoi continuă generarea următoarei. Tot e mult mai rapid perceput
+#     decât varianta blocantă completă, dar nu e suprapunere reală.
+#     (Poate fi adăugată ulterior cu un thread producător/consumator.)
+
+# Potrivește sfârșitul unei propoziții: unul sau mai multe din .!? —
+# opțional urmate de ghilimele/paranteză de închidere — apoi spațiu
+# (sau sfârșitul textului acumulat până acum).
+_PATTERN_SFARSIT_PROPOZITIE = re.compile(r'[.!?]+[”"\')\]]?(?:\s+|$)')
+
+
+def agent_loop_streaming(
+    client,
+    model: str,
+    system_prompt: str,
+    istoric: list,
+    unelte_permise: list[str] | None = None,
+    la_propozitie_gata=None,
+    flag_intrerupere=None,
+) -> str:
+    """
+    Variantă de agent_loop care STREAMEAZĂ răspunsul, tăind textul pe
+    propoziții complete și trimițându-le imediat către `la_propozitie_gata`
+    (de obicei `spune()` din tts.py), pe măsură ce Gemini le generează —
+    nu se așteaptă tot răspunsul.
+
+    Parametri:
+        unelte_permise:     identic cu agent_loop — restricționează uneltele
+                            disponibile (folosit și de sub-agenți, dacă
+                            vreodată au nevoie de variantă streaming).
+        la_propozitie_gata: callback(text: str), apelat pentru fiecare
+                            propoziție completă detectată în stream. Dacă
+                            e None, funcționează ca un agent_loop obișnuit,
+                            doar streamează intern fără să facă nimic cu
+                            propozițiile (echivalent funcțional, dar fără
+                            beneficiul de latență).
+        flag_intrerupere:   threading.Event opțional (Task 6.10 — barge-in).
+                            Verificat înainte de fiecare propoziție nouă —
+                            dacă e setat, oprim consumul stream-ului și
+                            generarea de propoziții noi imediat, nu doar
+                            redarea audio curentă (care se oprește separat,
+                            prin tts.opreste(), apelat de barge_in.py).
+
+    Returnează textul complet al răspunsului final (pentru istoric/log),
+    identic ca rezultat cu agent_loop — doar livrarea către utilizator
+    diferă (bucată cu bucată, nu tot odată).
+    """
+    unelte = get_unelte_pentru_gemini(doar_functiile=unelte_permise)
+
+    for pas in range(MAX_PASI):
+        history = istoric[:-1] if len(istoric) > 1 else []
+        chat = client.chats.create(
+            model=model,
+            history=history,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=unelte if unelte else None,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=True
+                ),
+            ),
+        )
+
+        ultimul_mesaj = istoric[-1]
+        if hasattr(ultimul_mesaj, "parts"):
+            mesaj_trimis = ultimul_mesaj.parts
+        else:
+            mesaj_trimis = str(ultimul_mesaj)
+
+        buffer_text = ""
+        text_complet = ""
+        apeluri_functii = []
+        continut_final = None
+        intrerupt = False
+
+        for chunk in chat.send_message_stream(mesaj_trimis):
+            if flag_intrerupere is not None and flag_intrerupere.is_set():
+                intrerupt = True
+                break
+
+            if not chunk.candidates:
+                continue
+
+            continut = chunk.candidates[0].content
+            if continut is None or not continut.parts:
+                continue
+
+            continut_final = continut
+
+            for parte in continut.parts:
+                if parte.function_call:
+                    apeluri_functii.append(parte.function_call)
+                elif parte.text:
+                    buffer_text += parte.text
+                    text_complet += parte.text
+
+                    # Tăiem propoziții complete din buffer pe măsură ce apar
+                    while True:
+                        if flag_intrerupere is not None and flag_intrerupere.is_set():
+                            intrerupt = True
+                            break
+
+                        potrivire = _PATTERN_SFARSIT_PROPOZITIE.search(buffer_text)
+                        if not potrivire:
+                            break
+                        capat = potrivire.end()
+                        propozitie = buffer_text[:capat].strip()
+                        buffer_text = buffer_text[capat:]
+                        if propozitie and la_propozitie_gata:
+                            la_propozitie_gata(propozitie)
+
+                if intrerupt:
+                    break
+            if intrerupt:
+                break
+
+        if intrerupt:
+            # Am fost întrerupți — nu mai rostim restul din buffer, nu mai
+            # cerem alt pas din buclă. Salvăm în istoric ce am generat până
+            # acum (dacă avem conținut valid), ca și context pentru tura
+            # următoare, și returnăm ce s-a apucat să genereze.
+            if continut_final is not None:
+                istoric.append(continut_final)
+            print("[Agent] Generare întreruptă de barge-in.")
+            return text_complet or "[întrerupt]"
+
+        # Ce a rămas în buffer (ultima propoziție, fără spațiu final tăiat)
+        if buffer_text.strip() and la_propozitie_gata:
+            la_propozitie_gata(buffer_text.strip())
+
+        if apeluri_functii:
+            if continut_final is not None:
+                istoric.append(continut_final)
+
+            for apel in apeluri_functii:
+                print(f"[Jarvis cere să ruleze funcția: {apel.name}]")
+                argumente = dict(apel.args) if apel.args else {}
+
+                necesita_confirmare = CONFIRMARE_FUNCTII.get(apel.name, False)
+                aprobat, motiv = trece_prin_securitate(apel.name, argumente, necesita_confirmare)
+
+                if not aprobat:
+                    print(f"[SECURITATE: execuție blocată — {motiv}]")
+                    rezultat = {"eroare": motiv}
+                else:
+                    rezultat = ruleaza_functie(apel.name, argumente)
+
+                istoric.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part(
+                            function_response=types.FunctionResponse(
+                                name=apel.name,
+                                response=rezultat
+                            )
+                        )]
+                    )
+                )
+            continue  # continuăm bucla — cerem răspunsul următor, pe baza rezultatelor uneltelor
+
+        # Fără apeluri de funcții -> răspunsul e complet
+        if not text_complet.strip():
+            return "Vasea, nu am primit niciun răspuns valid. Poți reformula?"
+
+        if continut_final is not None:
+            istoric.append(continut_final)
+        return text_complet
+
+    return "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."

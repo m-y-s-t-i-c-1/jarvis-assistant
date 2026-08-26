@@ -1,5 +1,5 @@
 """
-Înregistrarea Inteligentă — VAD (Task 3.2)
+Înregistrarea Inteligentă — VAD (Task 3.2) + suport Barge-in (Task 6.10)
 
 Folosește Silero-VAD pentru a detecta automat când utilizatorul vorbește
 și când tace, fără apăsare de taste (push-to-talk). Ascultă continuu pe
@@ -16,13 +16,19 @@ Pe scurt, fluxul e:
 
 Acest modul NU face transcriere (asta e Task 3.3, Whisper) — doar decide
 CÂND să trimită audio-ul către transcriere.
+
+Task 6.10 — barge-in: expune și `probabilitate_vorbire()`, care returnează
+scorul brut Silero (0-1), fără prag aplicat. Folosit de src/core/barge_in.py
+ca să aplice un prag PROPRIU, mai strict decât cel de conversație normală
+(PRAG_PROBABILITATE_VORBIRE), pentru a reduce fals-pozitivele din ecoul
+acustic al lui Jarvis în timpul redării TTS.
 """
 
 import numpy as np
 import sounddevice as sd
 import torch
 
-from src.core.audio_io import SAMPLE_RATE, DEVICE_IMPLICIT
+from src.core.audio_io import SAMPLE_RATE, safe_input_stream
 
 # Silero-VAD funcționează nativ pe blocuri de 512 samples la 16kHz (32ms)
 MARIME_BLOC = 512
@@ -55,12 +61,20 @@ class DetectorActivitateVocala:
         )
         self.model.eval()
 
-    def _e_vorbire(self, bloc_audio: np.ndarray) -> bool:
-        """Verifică dacă un singur bloc de audio conține vorbire."""
+    def probabilitate_vorbire(self, bloc_audio: np.ndarray) -> float:
+        """
+        Returnează probabilitatea BRUTĂ de vorbire (0.0-1.0) pentru un bloc
+        audio, FĂRĂ niciun prag aplicat — decizia "e vorbire sau nu" rămâne
+        la apelant. Folosit de barge_in.py, care aplică un prag propriu,
+        mai strict decât PRAG_PROBABILITATE_VORBIRE de mai jos.
+        """
         tensor = torch.from_numpy(bloc_audio).float()
         with torch.no_grad():
-            probabilitate = self.model(tensor, SAMPLE_RATE).item()
-        return probabilitate >= PRAG_PROBABILITATE_VORBIRE
+            return self.model(tensor, SAMPLE_RATE).item()
+
+    def _e_vorbire(self, bloc_audio: np.ndarray) -> bool:
+        """Verifică dacă un singur bloc de audio conține vorbire (prag standard)."""
+        return self.probabilitate_vorbire(bloc_audio) >= PRAG_PROBABILITATE_VORBIRE
 
     def asculta_pana_la_pauza(self) -> np.ndarray | None:
         """
@@ -86,12 +100,15 @@ class DetectorActivitateVocala:
 
         print("[Ascult... vorbește când ești gata]")
 
-        with sd.InputStream(
+        # Folosim device-ul implicit al sistemului (pipewire/resampler),
+        # pentru că VAD/Wake-word ascultă doar când Jarvis NU vorbește
+        # și nu are nevoie de anulare de ecou dedicată.
+        with safe_input_stream(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
             blocksize=MARIME_BLOC,
-            device=DEVICE_IMPLICIT,
+            device=None,
         ) as stream:
 
             for _ in range(blocuri_maxime):

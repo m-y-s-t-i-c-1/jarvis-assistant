@@ -17,7 +17,8 @@ from src.core.rag import rag
 from src.core.consolidare import consolidare
 from src.core.router import clasifica, este_raspuns_scurt_de_continuare
 from src.core.monitor_ecran import porneste_monitorizare_ecran
-from src.tools.vedere import analizeaza_pentru_alerta
+from src.core.monitor_log import porneste_monitorizare_log
+from src.tools.vedere import analizeaza_ecran_complet
 from src.core.llm_provider import (
     intreaba_nvidia_conversatie,
     intreaba_nvidia_cod,
@@ -263,6 +264,12 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             db.inchide_sesiune(sesiune_id)
             break
 
+        if not mesaj_utilizator.strip():
+            # Enter fără text (des posibil când wake word/monitoarele
+            # scriu în terminal concurent) — reluăm fără să irosim un
+            # apel API pe un mesaj gol.
+            continue
+
         # Adăugăm în istoric
         istoric.append(
             types.Content(role="user", parts=[types.Part(text=mesaj_utilizator)])
@@ -306,20 +313,94 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
 
 
 # ---- Pornire ----
+
+# Răcire minimă separată pentru comentarii de personalitate (non-urgente) —
+# mult mai mare decât cea de 30s de la monitor_ecran.py (care rămâne
+# neschimbată pentru alertele urgente). Fără asta, Jarvis ar putea comenta
+# la fiecare schimbare de ecran, devenind enervant în loc de carismatic.
+RACIRE_COMENTARIU_SECUNDE = 600  # 10 minute
+_ultimul_comentariu_timp = 0.0
+
+
 def _la_schimbare_ecran():
     """
     Callback apelat de monitor_ecran.py când detectează o schimbare
-    vizuală locală confirmată. Face UN singur apel API (analiza de
-    alertă) și, doar dacă e relevant, te anunță — altfel tace complet.
+    vizuală locală confirmată. UN singur apel Gemini, care clasifică în
+    "urgent" / "comentariu" / "nimic":
+
+        "urgent"      -> te anunță imediat (răcirea de 30s vine deja din
+                         monitor_ecran.py, înainte să ajungă aici)
+        "comentariu"  -> te anunță DOAR dacă au trecut cel puțin
+                         RACIRE_COMENTARIU_SECUNDE de la ultimul comentariu
+        "nimic"       -> tace complet
     """
-    relevant, mesaj = analizeaza_pentru_alerta()
-    if relevant and mesaj:
+    global _ultimul_comentariu_timp
+
+    rezultat = analizeaza_ecran_complet()
+    tip, mesaj = rezultat["tip"], rezultat["mesaj"]
+
+    if not mesaj:
+        return
+
+    if tip == "urgent":
         print(f"\n🔔 [Jarvis observă]: {mesaj}\nTu: ", end="", flush=True)
+
+    elif tip == "comentariu":
+        acum = time.time()
+        if acum - _ultimul_comentariu_timp >= RACIRE_COMENTARIU_SECUNDE:
+            _ultimul_comentariu_timp = acum
+            print(f"\n💬 [Jarvis]: {mesaj}\nTu: ", end="", flush=True)
+        # altfel: comentariu detectat, dar suprimat — încă în perioada de răcire
+
+
+def _la_eroare_log(sursa: str, linie: str):
+    """
+    Callback apelat de monitor_log.py când o linie din jurnalul de sistem
+    sau kernel se potrivește unui pattern de eroare. Spre deosebire de
+    _la_schimbare_ecran, NU mai trece prin Gemini — pattern-ul text e deja
+    suficient de precis, deci alerta e instantă și gratuită.
+    """
+    print(f"\n🔔 [Jarvis observă — {sursa}]: {linie}\nTu: ", end="", flush=True)
+
+
+def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_gemini):
+    """
+    Al treilea canal senzorial (alături de vedere și log-uri): ascultare
+    pasivă ("Hey Jarvis"), pornită în fundal INDIFERENT de modul de
+    interacțiune ales — nu doar dacă alegi explicit [2] sau [3].
+
+    Eșuează elegant, cu mesaj clar, dacă dependențele audio (openwakeword,
+    silero-vad, faster-whisper, sounddevice) lipsesc sau microfonul nu e
+    configurat — restul lui Jarvis (text, vedere, log-uri) rămâne complet
+    funcțional, nu blocăm pornirea pentru asta.
+    """
+    try:
+        from src.core.wake_word import porneste_cu_wake_word
+    except ImportError as e:
+        print(f"[Senzorial] Ascultare pasivă indisponibilă (dependențe audio lipsă): {e}")
+        return
+    except Exception as e:
+        print(f"[Senzorial] Ascultare pasivă indisponibilă: {e}")
+        return
+
+    def _bucla():
+        try:
+            porneste_cu_wake_word(
+                istoric=istoric_ref,
+                rotatie_clienti=rotatie_clienti,
+                model_gemini=model_gemini,
+            )
+        except Exception as e:
+            print(f"[Senzorial] Ascultare pasivă oprită din cauza unei erori: {e}")
+
+    threading.Thread(target=_bucla, daemon=True).start()
+    print("[Senzorial] Ascultare pasivă pornită în fundal — spune 'Hey Jarvis' oricând.")
 
 
 # ---- Pornire ----
 porneste_thread_watcher()
 porneste_monitorizare_ecran(_la_schimbare_ecran)
+porneste_monitorizare_log(_la_eroare_log)
 istoric = []
 sesiune_id = db.incepe_sesiune()
 
@@ -366,4 +447,9 @@ elif alegere in ("3", "ambele"):
     bucla_text(istoric, sesiune_id, SYSTEM_PROMPT)
 
 else:
+    # Modul implicit [1]: text în terminal, DAR pornim și ascultarea
+    # pasivă în fundal (Task 6.8) — canalul senzorial auditiv nu mai
+    # depinde de alegerea explicită a modului [2]/[3]. Eșuează elegant
+    # dacă lipsesc dependențele audio (vezi funcția de mai sus).
+    _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL)
     bucla_text(istoric, sesiune_id, SYSTEM_PROMPT)
