@@ -1,42 +1,59 @@
 """
-Sintetizarea și Redarea Vocii — Text-to-Speech (Task 3.4)
+Sintetizarea și Redarea Vocii — Text-to-Speech (Task 3.4 + fix Task 6.10)
 
 Folosește Piper TTS (local, offline) pentru a transforma textul răspunsurilor
 lui Jarvis în audio redat prin boxe. Piper scrie WAV într-un fișier temporar
 (are nevoie de seek() pentru a scrie headerul), pe care îl citim și redăm
 prin sounddevice, apoi îl ștergem.
 
-Task 6.10 — redare prin echo-cancel-sink: dacă modulul PipeWire de anulare
-ecou e configurat (vezi audio_io.py), redarea trece prin DEVICE_REDARE_DIFUZOARE
-("echo-cancel-sink") în loc de device-ul implicit — necesar ca modulul să
-aibă semnalul de referință pentru anularea ecoului în timpul barge-in.
+FIX (bug "Jarvis mă aude dar nu răspunde cu voce"):
+    DEVICE_REDARE_DIFUZOARE (echo-cancel-sink, Task 6.10) e un nod PipeWire
+    brut, NU device-ul generic "pipewire" care face resampling automat.
+    Nodurile de filtru create de module-echo-cancel acceptă de regulă DOAR
+    rata lor nativă configurată (de obicei 48000 Hz) — orice altă rată
+    trimisă direct de aplicație (16000 Hz de la Whisper, sau rata WAV-ului
+    generat de Piper, adesea 22050 Hz) e respinsă de PortAudio cu:
 
-Arhitectură:
-    spune(text) — funcția principală, apelată din orchestratorul audio (Task 3.5)
-    _reda_wav_bytes(bytes) — parsează headerul WAV și redă audio-ul prin sounddevice
-    opreste() — întrerupe redarea curentă (pentru barge-in, Task 3.7 / 6.10)
+        PortAudioError: Error opening OutputStream: Invalid sample rate
+        [PaErrorCode -9997]
+
+    Asta cădea silențios din perspectiva utilizatorului: STT + agent
+    funcționau (textul apărea în terminal), dar TTS-ul eșua mereu chiar
+    la deschiderea stream-ului, înainte să scoată vreun sunet.
+
+    Soluție: interogăm rata nativă a device-ului de redare cu
+    sd.query_devices() și reeșantionăm audio-ul cu scipy.signal.resample_poly
+    (aceeași tehnică deja folosită în barge_in.py pentru captură) înainte
+    de a deschide stream-ul, la rata corectă. Dacă redarea tot eșuează
+    (device ocupat, echo-cancel dezactivat între timp etc.), cădem elegant
+    pe DEVICE_IMPLICIT (device-ul generic "pipewire", cu resampling automat)
+    — Jarvis tot vorbește, doar fără beneficiul anulării de ecou pentru
+    acel enunț.
 
 Configurare în .env (opțional):
     PIPER_BINARY   — calea către executabilul piper (default: piper)
-    PIPER_MODEL    — calea către fișierul .onnx (default: voci_piper/ro_RO-mihai-medium.onnx)
+    PIPER_MODEL    — calea către fișierul .onnx
 """
 
 import io
 import os
 import wave
+import math
 import tempfile
 import threading
 import subprocess
-import shutil
-import time
-from src.core import audio_player
 
 import numpy as np
 import sounddevice as sd
 from scipy.signal import resample_poly
 from dotenv import load_dotenv
 
-from src.core.audio_io import DEVICE_REDARE_DIFUZOARE, _OPEN_CLOSE_LOCK
+from src.core.audio_io import (
+    BLOCKSIZE,
+    DEVICE_IMPLICIT,
+    DEVICE_REDARE_DIFUZOARE,
+    safe_output_stream,
+)
 
 load_dotenv()
 
@@ -44,62 +61,93 @@ load_dotenv()
 PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
 PIPER_MODEL  = os.getenv("PIPER_MODEL", "voci_piper/ro_RO-mihai-medium.onnx")
 
-# Eveniment pentru oprirea redării în curs (barge-in, Task 3.7/6.10)
+# Eveniment pentru oprirea redării în curs (barge-in, Task 3.7 / 6.10)
 _stop_event = threading.Event()
 
 # Lock ca să nu pornească două redări simultan
 _redare_lock = threading.Lock()
 
 
-def _reesantioneaza(audio: np.ndarray, rata_sursa: int, rata_tinta: int) -> np.ndarray:
-    """
-    Reeșantionare cu filtrare anti-aliasing folosind `resample_poly`.
-
-    Suportă audio mono (1D) sau multi-canal (2D, shape (n, canale)).
-    """
-    if rata_sursa == rata_tinta or len(audio) == 0:
-        return audio.astype(np.float32)
-
-    up = rata_tinta
-    down = rata_sursa
-
-    # `resample_poly` lucrează pe axis=0; suportă array 1D sau 2D direct
+def _rata_nativa(device) -> int | None:
+    """Interoghează rata de eșantionare implicită a unui device sounddevice."""
     try:
-        res = resample_poly(audio, up, down, axis=0).astype(np.float32)
+        info = sd.query_devices(device)
+        return int(info["default_samplerate"])
     except Exception:
-        # Fallback la interpolare liniară dacă ceva e în neregulă
-        if audio.ndim == 1:
-            n_esantioane_noi = max(1, int(len(audio) * rata_tinta / rata_sursa))
-            indici_noi = np.linspace(0, len(audio) - 1, n_esantioane_noi)
-            indici_vechi = np.arange(len(audio))
-            res = np.interp(indici_noi, indici_vechi, audio).astype(np.float32)
-        else:
-            n_esantioane_noi = max(1, int(audio.shape[0] * rata_tinta / rata_sursa))
-            indici_noi = np.linspace(0, audio.shape[0] - 1, n_esantioane_noi)
-            indici_vechi = np.arange(audio.shape[0])
-            canale_resample = [
-                np.interp(indici_noi, indici_vechi, audio[:, c])
-                for c in range(audio.shape[1])
-            ]
-            res = np.stack(canale_resample, axis=1).astype(np.float32)
+        return None
 
-    return res
+
+def _reesantioneaza(audio_f32: np.ndarray, rata_sursa: int, rata_tinta: int) -> np.ndarray:
+    """
+    Reeșantionează audio float32 (1D mono sau 2D multi-canal) de la
+    rata_sursa la rata_tinta, cu resample_poly + GCD (ca în barge_in.py).
+    """
+    if rata_sursa == rata_tinta or len(audio_f32) == 0:
+        return audio_f32
+
+    divizor = math.gcd(rata_sursa, rata_tinta)
+    up = rata_tinta // divizor
+    down = rata_sursa // divizor
+    reesantionat = resample_poly(audio_f32, up, down, axis=0).astype(np.float32)
+
+    # IMPORTANT: resample_poly poate produce mici depășiri peste ±1.0
+    # (ringing/Gibbs), care la redare float32 sună ca trosnituri/distorsiune
+    # ("difuzor stricat"). Reducem ușor nivelul înainte de clip ca să nu
+    # tăiem vârfurile reale ale vocii Piper (clip hard = distorsiune dură).
+    reesantionat *= 0.92
+    return np.clip(reesantionat, -1.0, 1.0)
+
+
+def _incearca_redare(audio_f32: np.ndarray, n_canale: int, rata: int, device) -> None:
+    """
+    Deschide un OutputStream pe device-ul dat, la rata dată, și redă blocul de audio.
+
+    IMPORTANT: folosim safe_output_stream (nu sd.OutputStream direct) —
+    serializes deschiderea/închiderea prin _OPEN_CLOSE_LOCK din audio_io.py,
+    exact ca să nu intre în conflict cu InputStream-ul deschis concurent de
+    barge_in.py (safe_input_stream) în timp ce Jarvis vorbește. Fără acest
+    lock, deschiderea simultană a două stream-uri PortAudio pe noduri
+    PipeWire înrudite (echo-cancel-source + echo-cancel-sink) poate produce
+    glitch-uri audio și poate rupe detectarea întreruperii (barge-in).
+    """
+    # Blocuri scurte: latență mică la barge-in (opreste() oprește la următorul
+    # write) + mai puține underrun-uri „robotice” decât un buffer uriaș.
+    bloc_size = max(256, BLOCKSIZE)
+    idx = 0
+
+    with safe_output_stream(
+        samplerate=rata,
+        channels=n_canale,
+        dtype="float32",
+        device=device,
+        blocksize=bloc_size,
+    ) as stream:
+        while idx < len(audio_f32) and not _stop_event.is_set():
+            bloc = audio_f32[idx: idx + bloc_size]
+            if bloc.ndim == 1:
+                bloc = bloc.reshape(-1, 1)
+            stream.write(bloc)
+            idx += bloc_size
+
+        # La barge-in, abortăm stream-ul ca PortAudio să nu mai flush-uiască
+        # bufferul rămas (altfel Jarvis mai vorbește ~100–200ms după stop).
+        if _stop_event.is_set():
+            try:
+                stream.abort()
+            except Exception:
+                pass
 
 
 def _reda_wav_bytes(wav_bytes: bytes) -> None:
     """
-    Parsează un blob WAV din memorie și îl redă prin sounddevice, pe
-    DEVICE_REDARE_DIFUZOARE (echo-cancel-sink dacă e disponibil).
+    Parsează un blob WAV din memorie și îl redă prin sounddevice.
     Blochează până se termină redarea SAU până _stop_event e setat.
 
-    IMPORTANT: device-urile virtuale PipeWire (ex: echo-cancel-sink) au
-    adesea o rată de eșantionare FIXĂ (setată la crearea filtrului),
-    spre deosebire de device-ul generic "pipewire", care face resampling
-    automat la orice rată. Piper generează frecvent la 22050 Hz — dacă
-    rata WAV-ului nu se potrivește cu rata nativă a device-ului, PortAudio
-    aruncă "Invalid sample rate" direct la deschiderea stream-ului. Ca să
-    evităm asta, reeșantionăm manual înainte de redare, la rata nativă a
-    device-ului curent.
+    Încearcă întâi DEVICE_REDARE_DIFUZOARE (echo-cancel-sink, dacă e
+    disponibil), reeșantionând la rata lui nativă. Dacă asta eșuează
+    (ex: Invalid sample rate, device ocupat), cade pe DEVICE_IMPLICIT,
+    care face resampling automat prin PipeWire — mai puțin optim pentru
+    barge-in, dar garantează că Jarvis tot vorbește.
     """
     with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
         sample_rate  = wf.getframerate()
@@ -116,66 +164,50 @@ def _reda_wav_bytes(wav_bytes: bytes) -> None:
         audio = audio.reshape(-1, n_canale)
 
     audio_f32 = audio.astype(np.float32) / np.iinfo(dtype).max
-    # Creăm un fișier temporar WAV și încercăm să-l redăm cu un player extern
-    # (paplay sau aplay) înainte de a folosi PortAudio, pentru a evita crash-urile
-    # cunoscute în anumite combinații libportaudio/driver.
-    tmp_path = None
+
+    erori = []
+    device_preferat = DEVICE_REDARE_DIFUZOARE
+    device_fallback = DEVICE_IMPLICIT
+    # DEVICE_* cade pe "pipewire" (string), niciodată pe None — deci încercăm
+    # mereu path-ul preferat, apoi fallback doar dacă e un device diferit.
+    acelasi_device = device_preferat == device_fallback
+
+    # ── Încercarea 1: device-ul de anulare ecou, la rata lui nativă ──────
     try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
-            tf.write(wav_bytes)
-            tmp_path = tf.name
+        rata_nativa = _rata_nativa(device_preferat)
+        if rata_nativa is None:
+            raise RuntimeError("Nu am putut determina rata nativă a device-ului.")
 
-        # Încercăm `paplay` (PulseAudio/PipeWire friendly), apoi `aplay` ca fallback
-        player = shutil.which("paplay") or shutil.which("aplay")
-        if player:
-            try:
-                proc = subprocess.Popen([player, tmp_path])
-                # Așteptăm terminarea player-ului sau eventul de stop
-                while proc.poll() is None and not _stop_event.is_set():
-                    time.sleep(0.05)
+        audio_convertit = audio_f32
+        if rata_nativa != sample_rate:
+            audio_convertit = _reesantioneaza(audio_f32, sample_rate, rata_nativa)
 
-                if _stop_event.is_set() and proc.poll() is None:
-                    try:
-                        proc.terminate()
-                        proc.wait(timeout=1.0)
-                    except Exception:
-                        proc.kill()
-                return
-            except FileNotFoundError:
-                # Nu găsim player-ul; cădem în fallback la sounddevice
-                pass
+        _incearca_redare(audio_convertit, n_canale, rata_nativa, device_preferat)
+        return  # succes — gata
+    except Exception as e:
+        erori.append(
+            f"DEVICE_REDARE_DIFUZOARE [{device_preferat}]: "
+            f"{type(e).__name__}: {e}"
+        )
+        if not acelasi_device:
+            print(
+                f"[TTS] Redare pe echo-cancel-sink a eșuat ({type(e).__name__}: {e}). "
+                f"Cad pe device-ul implicit, fără anulare de ecou pentru acest enunț."
+            )
 
-        # Dacă nu avem player extern sau elșuie, folosim player-ul persistent
-        # care păstrează un OutputStream deschis (reduce riscul deschiderilor/închiderilor repetate)
+    # ── Încercarea 2 (fallback): device-ul implicit, cu resampling automat ──
+    if not acelasi_device:
         try:
-            audio_player.play_blocking(audio_f32, sample_rate, _stop_event)
+            _incearca_redare(audio_f32, n_canale, sample_rate, device_fallback)
             return
         except Exception as e:
-            print(f"[TTS] Player persistent a eșuat: {e} — încerc fallback sounddevice/paplay")
+            erori.append(f"DEVICE_IMPLICIT [{device_fallback}]: {type(e).__name__}: {e}")
 
-        # Verificăm rata nativă a device-ului de redare și reeșantionăm dacă diferă
-        try:
-            info_device = sd.query_devices(DEVICE_REDARE_DIFUZOARE)
-            rata_device = int(info_device["default_samplerate"])
-            if rata_device != sample_rate:
-                audio_f32 = _reesantioneaza(audio_f32, sample_rate, rata_device)
-                sample_rate = rata_device
-        except Exception as e:
-            print(f"[TTS] Nu am putut verifica rata device-ului, redau la rata originală: {e}")
-
-        # Fallback final: try sd.play (serialized open/close)
-        try:
-            with _OPEN_CLOSE_LOCK:
-                sd.play(audio_f32, samplerate=sample_rate, device=DEVICE_REDARE_DIFUZOARE)
-                sd.wait()
-        except Exception as e2:
-            print(f"[TTS] sd.play a eșuat: {e2}")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+    raise RuntimeError(
+        "Redarea TTS a eșuat pe toate device-urile încercate:\n  "
+        + "\n  ".join(erori)
+        + "\nRulează listeaza_device_uri() din audio_io.py pentru diagnostic."
+    )
 
 
 def spune(text: str) -> None:
@@ -239,7 +271,7 @@ def spune(text: str) -> None:
 def opreste() -> None:
     """
     Oprește redarea vocii în curs.
-    Apelat din Task 3.7/6.10 (barge-in) când utilizatorul începe să vorbească.
+    Apelat din Task 3.7 / 6.10 (barge-in) când utilizatorul începe să vorbească.
     """
     _stop_event.set()
 
@@ -256,6 +288,8 @@ if __name__ == "__main__":
     print(f"[Sintetizare: \"{text_test}\"]")
     print(f"[Model: {PIPER_MODEL}]")
     print(f"[Binar: {PIPER_BINARY}]")
+    print(f"[Device redare (echo-cancel): {DEVICE_REDARE_DIFUZOARE}]")
+    print(f"[Device implicit (fallback): {DEVICE_IMPLICIT}]")
 
     try:
         spune(text_test)
