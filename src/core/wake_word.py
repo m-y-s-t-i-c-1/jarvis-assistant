@@ -104,9 +104,17 @@ def porneste_cu_wake_word(
     """
     from src.core.audio_loop import porneste_bucla_audio
     from src.core.tts import spune
+    from src.core.vad import obtine_detector
 
     if istoric is None:
         istoric = []
+
+    # Preîncărcăm Silero-VAD ACUM, nu imediat după TTS. Încărcarea Torch
+    # + deschiderea InputStream-ului VAD în aceeași clipă cu închiderea
+    # OutputStream-ului TTS a produs pe acest sistem:
+    #   free(): corrupted unsorted chunks  → abort (core dumped)
+    # (corupție de heap în PortAudio/PipeWire + alocatori nativi).
+    obtine_detector()
 
     print("\n" + "═" * 50)
     print("  Jarvis în așteptare. Spune 'Hey Jarvis'.")
@@ -119,10 +127,23 @@ def porneste_cu_wake_word(
             asteapta_wake_word()
 
             print("✅ Wake word detectat!")
+
+            # InputStream-ul wake word tocmai s-a închis. Fără o pauză scurtă,
+            # deschiderea imediată a OutputStream-ului TTS pe același backend
+            # PipeWire poate corupe heap-ul PortAudio (vezi PAUZA_DUPA_ACTIVARE).
+            try:
+                _obtine_model().reset()
+            except Exception:
+                pass
+            time.sleep(0.5)
+
             try:
                 spune("Ascult, Vasea.")
             except RuntimeError as e:
                 print(f"[TTS eroare]: {e}")
+
+            # La fel: lăsăm redarea să elibereze device-ul înainte de VAD.
+            time.sleep(0.4)
 
             porneste_bucla_audio(
                 istoric=istoric,

@@ -129,13 +129,10 @@ def _incearca_redare(audio_f32: np.ndarray, n_canale: int, rata: int, device) ->
             stream.write(bloc)
             idx += bloc_size
 
-        # La barge-in, abortăm stream-ul ca PortAudio să nu mai flush-uiască
-        # bufferul rămas (altfel Jarvis mai vorbește ~100–200ms după stop).
-        if _stop_event.is_set():
-            try:
-                stream.abort()
-            except Exception:
-                pass
+        # NU apelăm stream.abort() aici: pe PipeWire/PortAudio, abort() +
+        # close() din __exit__ a dus la "free(): corrupted unsorted chunks".
+        # Oprirea la următorul write (via _stop_event) e suficientă pentru
+        # barge-in; eventualele ~50–100ms rămase în buffer sunt acceptabile.
 
 
 def _reda_wav_bytes(wav_bytes: bytes) -> None:

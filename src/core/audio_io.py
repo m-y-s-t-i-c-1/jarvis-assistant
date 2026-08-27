@@ -25,6 +25,7 @@ Format audio standard folosit în tot proiectul:
 import sounddevice as sd
 import numpy as np
 import threading
+import time
 from contextlib import contextmanager
 
 # Configurare audio standard — folosită peste tot în Faza 3
@@ -57,7 +58,6 @@ def safe_input_stream(*args, **kwargs):
     with _OPEN_CLOSE_LOCK:
         stream = sd.InputStream(*args, **kwargs)
         stream.__enter__()
-
     try:
         yield stream
     finally:
@@ -66,6 +66,8 @@ def safe_input_stream(*args, **kwargs):
                 stream.__exit__(None, None, None)
             except Exception:
                 pass
+            # Aceeași pauză ca la output — vezi safe_output_stream.
+            time.sleep(0.05)
 
 
 @contextmanager
@@ -74,7 +76,6 @@ def safe_output_stream(*args, **kwargs):
     with _OPEN_CLOSE_LOCK:
         stream = sd.OutputStream(*args, **kwargs)
         stream.__enter__()
-
     try:
         yield stream
     finally:
@@ -83,6 +84,10 @@ def safe_output_stream(*args, **kwargs):
                 stream.__exit__(None, None, None)
             except Exception:
                 pass
+            # Mică pauză după close: pe unele stack-uri PipeWire/PortAudio,
+            # open imediat pe alt tip de stream (input↔output) corupe heap-ul
+            # (free(): corrupted unsorted chunks).
+            time.sleep(0.05)
 
 
 def _gaseste_device_dupa_nume(nume_partial: str):
@@ -103,7 +108,6 @@ def _gaseste_device_dupa_nume(nume_partial: str):
     for i, dev in enumerate(device_uri):
         if nume_partial.lower() in dev["name"].lower():
             return i
-
     return None
 
 
