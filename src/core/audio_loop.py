@@ -10,21 +10,17 @@ Leagă toate modulele din Faza 3 într-o buclă continuă:
                  tot răspunsul (Task 6.9 — "vorbește pe măsură ce gândește")
     5. repeat  — revine la pasul 1
 
-Diferență față de versiunea anterioară: în loc de
+Diferență față de varianta blocantă: în loc de
     raspuns_text = agent_loop(...); spune(raspuns_text)
 folosim
-    raspuns_text = agent_loop_streaming(..., la_propozitie_gata=spune)
+    raspuns_text = agent_loop_streaming(..., la_propozitie_gata=...)
 Jarvis începe să vorbească la prima propoziție completă generată, în loc
 să aștepte tot răspunsul — latență percepută mult mai mică în conversație
-vocală.
+vocală. Fiecare propoziție trece prin vorbeste_cu_intrerupere (Task 6.10)
+ca să poți opri Jarvis vorbind peste el.
 
 Comenzi vocale speciale (recunoscute după transcriere):
     "exit" / "stop" / "ieși" / "oprește-te"  — închide bucla vocală
-
-Conectare cu main.py:
-    Istoricul conversației e același obiect `istoric` folosit și de
-    interfața text din main.py — poți comuta între voce și text oricând,
-    conversația rămâne continuă.
 
 Rulare standalone (mod voce pur, fără terminal):
     python -m src.core.audio_loop
@@ -37,6 +33,7 @@ Rulare din main.py (integrat):
 import os
 import time
 import threading
+import traceback
 import itertools
 from dotenv import load_dotenv
 from google import genai
@@ -109,7 +106,7 @@ Reguli de comportament:
 def porneste_bucla_audio(
     istoric: list | None = None,
     rotatie_clienti=None,
-    model: str = "gemini-3.6-flash",
+    model: str = "gemini-2.5-flash",
 ) -> None:
     """
     Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
@@ -158,7 +155,10 @@ def porneste_bucla_audio(
         if text_curat in COMENZI_OPRIRE or any(cmd in text_curat.split() for cmd in COMENZI_OPRIRE):
             raspuns_oprire = "La revedere, Vasea. Modul vocal dezactivat."
             print(f"Jarvis: {raspuns_oprire}")
-            spune(raspuns_oprire)
+            try:
+                spune(raspuns_oprire)
+            except Exception as e:
+                print(f"[EROARE TTS la mesajul de oprire]: {type(e).__name__}: {e}")
             break
 
         # ── Pasul 3+4: Agent (streaming) + TTS pe măsură ce vine ─────────
@@ -171,7 +171,6 @@ def porneste_bucla_audio(
         )
 
         print(INDICATOR["vorbesc"])
-        raspuns_complet_afisat = []
         flag_intrerupere = threading.Event()
 
         def _la_propozitie(propozitie: str):
@@ -183,7 +182,6 @@ def porneste_bucla_audio(
             verifică și oprește generarea propozițiilor următoare, nu
             doar redarea celei curente.
             """
-            raspuns_complet_afisat.append(propozitie)
             print(f"Jarvis: {propozitie}")
 
             a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
@@ -192,7 +190,7 @@ def porneste_bucla_audio(
 
         try:
             client_curent = next(rotatie_clienti)
-            raspuns_text = agent_loop_streaming(
+            agent_loop_streaming(
                 client_curent, model, SYSTEM_PROMPT, istoric,
                 la_propozitie_gata=_la_propozitie,
                 flag_intrerupere=flag_intrerupere,
@@ -200,7 +198,11 @@ def porneste_bucla_audio(
         except Exception as e:
             raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
             print(f"[EROARE agent]: {e}")
-            spune(raspuns_text)
+            traceback.print_exc()
+            try:
+                spune(raspuns_text)
+            except Exception as e_tts:
+                print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
 
         if flag_intrerupere.is_set():
             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")

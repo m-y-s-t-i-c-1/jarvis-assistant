@@ -18,6 +18,7 @@ Rulare:
 """
 
 import sys
+import os
 import time
 import argparse
 import numpy as np
@@ -36,19 +37,30 @@ MODEL_CHEIE  = "hey_jarvis_v0.1"
 PRAG_DETECTIE = 0.35
 MARIME_BLOC   = 1280       # 80ms la 16kHz — recomandat de OpenWakeWord
 
-# Secunde de tăcere după ce Jarvis termină de vorbit, înainte să
-# redeschidem stream-ul de captură pentru ascultarea pasivă.
-#
-# IMPORTANT (Task 6.8): crescut de la 1.5s la 3.0s — la 1.5s, redeschiderea
-# InputStream-ului venea prea aproape de închiderea stream-ului de redare
-# TTS (Piper, pe PipeWire), cauzând ocazional:
-#   "Unanticipated host error [PaErrorCode -9999]" / erori ALSA mmap.
-# E o instabilitate cunoscută PortAudio/ALSA/PipeWire la tranziții rapide
-# capture<->playback pe același device, nu ceva reparabil complet din
-# Python — 3s dă suficient timp device-ului să se elibereze complet.
-# Dacă tot mai apare eroarea, urcă și mai mult (ex: 4-5s), cu prețul unei
-# reactivări puțin mai lente după fiecare conversație vocală.
-PAUZA_DUPA_ACTIVARE = 3.0
+# Pauză după conversație, înainte de redeschiderea wake-word InputStream.
+PAUZA_DUPA_ACTIVARE = 1.0
+
+
+def _cale_model_wake() -> str:
+    """Cale portabilă către modelul hey_jarvis (nu hardcodată pe un singur PC)."""
+    env = os.getenv("WAKE_WORD_MODEL", "").strip()
+    if env and os.path.isfile(env):
+        return env
+    if os.path.isfile(CALE_MODEL):
+        return CALE_MODEL
+    try:
+        import openwakeword
+        baza = os.path.join(
+            os.path.dirname(openwakeword.__file__),
+            "resources",
+            "models",
+            "hey_jarvis_v0.1.onnx",
+        )
+        if os.path.isfile(baza):
+            return baza
+    except Exception:
+        pass
+    return CALE_MODEL
 
 # ── Model (lazy, o singură dată) ─────────────────────────────────────────────
 
@@ -58,8 +70,9 @@ _model_oww: Model | None = None
 def _obtine_model() -> Model:
     global _model_oww
     if _model_oww is None:
+        cale = _cale_model_wake()
         print(f"[Wake Word] Încărcare model '{MODEL_CHEIE}'...")
-        _model_oww = Model(wakeword_model_paths=[CALE_MODEL])
+        _model_oww = Model(wakeword_model_paths=[cale])
         print("[Wake Word] Model încărcat. Ascult după 'Hey Jarvis'...")
     return _model_oww
 
@@ -104,9 +117,17 @@ def porneste_cu_wake_word(
     """
     from src.core.audio_loop import porneste_bucla_audio
     from src.core.tts import spune
+    from src.core.vad import obtine_detector
 
     if istoric is None:
         istoric = []
+
+    # Preîncărcăm Silero-VAD ACUM, nu imediat după TTS. Încărcarea Torch
+    # + deschiderea InputStream-ului VAD în aceeași clipă cu închiderea
+    # OutputStream-ului TTS a produs pe acest sistem:
+    #   free(): corrupted unsorted chunks  → abort (core dumped)
+    # (corupție de heap în PortAudio/PipeWire + alocatori nativi).
+    obtine_detector()
 
     print("\n" + "═" * 50)
     print("  Jarvis în așteptare. Spune 'Hey Jarvis'.")
@@ -119,6 +140,14 @@ def porneste_cu_wake_word(
             asteapta_wake_word()
 
             print("✅ Wake word detectat!")
+
+            # TTS e acum pe player extern (proces separat) — nu mai deschide
+            # PortAudio OutputStream, deci nu mai e nevoie de pauze lungi.
+            try:
+                _obtine_model().reset()
+            except Exception:
+                pass
+
             try:
                 spune("Ascult, Vasea.")
             except RuntimeError as e:
