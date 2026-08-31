@@ -65,8 +65,8 @@ def transcrie(audio: np.ndarray) -> str:
     segmente, info = model.transcribe(
         audio_flat,
         language=LIMBA,
-        beam_size=8,                       # mai multe ipoteze explorate = mai puține confuzii
-        best_of=5,                         # generează mai multe candidate, alege cel mai probabil
+        beam_size=3,                       # redus de la 8 — mult mai rapid pe CPU,
+                                            # pierdere minimă de acuratețe pe enunțuri scurte
         temperature=0,                     # determinist, evită variații aleatoare pe enunțuri scurte
         condition_on_previous_text=False,  # nu propagă erori din context anterior
         vad_filter=False,  # VAD-ul nostru (Task 3.2) a filtrat deja tăcerea

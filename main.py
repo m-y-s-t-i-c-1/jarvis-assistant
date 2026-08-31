@@ -1,5 +1,6 @@
 import os
 import time
+import queue
 import itertools
 import threading
 from dotenv import load_dotenv
@@ -19,6 +20,8 @@ from src.core.router import clasifica, este_raspuns_scurt_de_continuare
 from src.core.monitor_ecran import porneste_monitorizare_ecran
 from src.core.monitor_log import porneste_monitorizare_log
 from src.tools.vedere import analizeaza_ecran_complet
+from src.core.tts import spune
+from src.core.stare_conversatie import conversatie_activa
 from src.core.llm_provider import (
     intreaba_nvidia_conversatie,
     intreaba_nvidia_cod,
@@ -322,16 +325,60 @@ RACIRE_COMENTARIU_SECUNDE = 600  # 10 minute
 _ultimul_comentariu_timp = 0.0
 
 
+_coada_alerte: queue.Queue[tuple[str, str]] = queue.Queue()
+
+# Cât așteptăm, cel mult, ca o conversație activă să se termine înainte
+# să vorbim o alertă oricum — plasă de siguranță ca să nu pierdem
+# alerte pentru totdeauna dacă flag-ul rămâne blocat din vreun motiv
+# neprevăzut (bug, thread mort etc.).
+_ASTEPTARE_MAXIMA_ALERTA_SECUNDE = 45.0
+
+
+def _bucla_alerte():
+    """
+    Thread dedicat, unic, care rostește alertele de ecran din
+    _coada_alerte. Așteaptă ca stare_conversatie.conversatie_activa să
+    fie clear() înainte să vorbească — altfel o alertă s-ar putea
+    strecura ÎNTRE două propoziții ale aceluiași răspuns al lui Jarvis
+    (spune() e protejat per-propoziție, nu pe durata întregii conversații
+    — vezi stare_conversatie.py pentru detalii).
+    """
+    while True:
+        mesaj, eticheta = _coada_alerte.get()
+
+        astept_de = time.time()
+        while conversatie_activa.is_set():
+            if time.time() - astept_de > _ASTEPTARE_MAXIMA_ALERTA_SECUNDE:
+                print(f"[Vedere] Aștept de peste {_ASTEPTARE_MAXIMA_ALERTA_SECUNDE:.0f}s conversația să se termine — vorbesc alerta oricum ({eticheta}).")
+                break
+            time.sleep(0.2)
+
+        try:
+            spune(mesaj)
+        except RuntimeError as e:
+            print(f"[Vedere] Nu am putut rosti alerta ({eticheta}): {e}")
+
+
+threading.Thread(target=_bucla_alerte, daemon=True).start()
+
+
+def _rosteste_alerta_pe_thread(mesaj: str, eticheta: str) -> None:
+    """Pune alerta la coadă — vorbită de _bucla_alerte, doar când nu ești în mijlocul unei conversații."""
+    _coada_alerte.put((mesaj, eticheta))
+
+
 def _la_schimbare_ecran():
     """
     Callback apelat de monitor_ecran.py când detectează o schimbare
     vizuală locală confirmată. UN singur apel Gemini, care clasifică în
     "urgent" / "comentariu" / "nimic":
 
-        "urgent"      -> te anunță imediat (răcirea de 30s vine deja din
-                         monitor_ecran.py, înainte să ajungă aici)
+        "urgent"      -> te anunță imediat, în scris ȘI cu voce (răcirea
+                         de 30s vine deja din monitor_ecran.py, înainte
+                         să ajungă aici)
         "comentariu"  -> te anunță DOAR dacă au trecut cel puțin
-                         RACIRE_COMENTARIU_SECUNDE de la ultimul comentariu
+                         RACIRE_COMENTARIU_SECUNDE de la ultimul
+                         comentariu, în scris ȘI cu voce
         "nimic"       -> tace complet
     """
     global _ultimul_comentariu_timp
@@ -344,12 +391,14 @@ def _la_schimbare_ecran():
 
     if tip == "urgent":
         print(f"\n🔔 [Jarvis observă]: {mesaj}\nTu: ", end="", flush=True)
+        _rosteste_alerta_pe_thread(mesaj, "urgent")
 
     elif tip == "comentariu":
         acum = time.time()
         if acum - _ultimul_comentariu_timp >= RACIRE_COMENTARIU_SECUNDE:
             _ultimul_comentariu_timp = acum
             print(f"\n💬 [Jarvis]: {mesaj}\nTu: ", end="", flush=True)
+            _rosteste_alerta_pe_thread(mesaj, "comentariu")
         # altfel: comentariu detectat, dar suprimat — încă în perioada de răcire
 
 

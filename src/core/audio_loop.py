@@ -31,6 +31,7 @@ Rulare din main.py (integrat):
 """
 
 import os
+import re
 import time
 import threading
 import traceback
@@ -43,7 +44,14 @@ from src.core.vad import obtine_detector
 from src.core.stt import transcrie
 from src.core.tts import spune
 from src.core.barge_in import vorbeste_cu_intrerupere
-from src.core.agent import agent_loop_streaming
+from src.core.agent import agent_loop_streaming, _PATTERN_SFARSIT_PROPOZITIE
+from src.core.router import clasifica, este_raspuns_scurt_de_continuare
+from src.core.stare_conversatie import conversatie_activa
+from src.core.llm_provider import (
+    intreaba_nvidia_cod,
+    intreaba_nvidia_conversatie,
+    istoric_la_mesaje_openai,
+)
 from src import tools  # noqa: F401 — înregistrează toate uneltele
 
 load_dotenv()
@@ -81,6 +89,48 @@ def _obtine_client_gemini():
     clienti = [genai.Client(api_key=k) for k in chei]
     rotatie = itertools.cycle(clienti)
     return rotatie
+
+
+# System prompt separat pentru NVIDIA (conversație/cod, FĂRĂ unelte reale) —
+# identic ca scop cu AVERTISMENT_NVIDIA_FARA_UNELTE din main.py, dar
+# reformulat pentru contextul vocal (fără liste, fără markdown).
+_AVERTISMENT_NVIDIA_VOCAL = """IMPORTANT — citește cu atenție înainte să răspunzi:
+În acest mod NU ai acces la nicio unealtă reală. NU poți rula comenzi, NU poți
+controla sistemul, ecranul sau orice altceva. Ești strict un model de
+conversație/cunoștințe generale, fără capacitate de acțiune.
+
+NU pretinde NICIODATĂ că ai executat o acțiune reală — asta ar fi o
+informație falsă transmisă lui Vasea. Dacă cererea pare să necesite o
+acțiune reală, spune-i clar că trebuie reformulată ca să ajungă la
+asistentul principal, cu unelte."""
+
+# Routare sticky (identic cu main.py, dar stare separată pentru modul
+# vocal): un răspuns scurt de continuare moștenește categoria turei
+# precedente, ca să nu rupem un flux de confirmare Gemini la jumătate.
+_ultima_categorie_vocal: str = "unelte"
+
+
+def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata) -> None:
+    """
+    Împarte un text complet (primit dintr-o singură bucată, de la NVIDIA —
+    care nu suportă streaming propoziție-cu-propoziție ca Gemini) în
+    propoziții, folosind același pattern ca agent_loop_streaming, și le
+    trimite pe rând la callback-ul de vorbire. Rezultatul perceput e
+    identic cu streaming-ul Gemini (Jarvis vorbește propoziție cu
+    propoziție) — diferența e că textul a fost deja generat integral
+    înainte să înceapă vorbirea, nu pe măsură ce vine.
+    """
+    pozitie = 0
+    for potrivire in _PATTERN_SFARSIT_PROPOZITIE.finditer(text):
+        capat = potrivire.end()
+        propozitie = text[pozitie:capat].strip()
+        if propozitie:
+            la_propozitie_gata(propozitie)
+        pozitie = capat
+
+    rest = text[pozitie:].strip()
+    if rest:
+        la_propozitie_gata(rest)
 
 
 SYSTEM_PROMPT = """Tu ești Jarvis, un asistent AI personal inteligent, eficient și loial.
@@ -161,7 +211,7 @@ def porneste_bucla_audio(
                 print(f"[EROARE TTS la mesajul de oprire]: {type(e).__name__}: {e}")
             break
 
-        # ── Pasul 3+4: Agent (streaming) + TTS pe măsură ce vine ─────────
+        # ── Pasul 3+4: Router → Agent (Gemini sau NVIDIA) + TTS pe măsură ──
         print(INDICATOR["gandesc"])
         istoric.append(
             types.Content(
@@ -175,12 +225,9 @@ def porneste_bucla_audio(
 
         def _la_propozitie(propozitie: str):
             """
-            Callback trimis la agent_loop_streaming: vorbește propoziția
-            IMEDIAT prin vorbeste_cu_intrerupere (Task 6.10 — ascultă
-            concurent pentru barge-in). Dacă utilizatorul vorbește peste
-            Jarvis, setăm flag_intrerupere — agent_loop_streaming îl
-            verifică și oprește generarea propozițiilor următoare, nu
-            doar redarea celei curente.
+            Vorbește o propoziție IMEDIAT prin vorbeste_cu_intrerupere
+            (Task 6.10 — ascultă concurent pentru barge-in). Dacă Vasea
+            vorbește peste Jarvis, setăm flag_intrerupere.
             """
             print(f"Jarvis: {propozitie}")
 
@@ -188,21 +235,82 @@ def porneste_bucla_audio(
             if a_fost_intrerupt:
                 flag_intrerupere.set()
 
+        # Clasificăm cererea — la fel ca în modul text (main.py), ca să nu
+        # trimitem TOTUL pe Gemini și să epuizăm cota gratuită (429
+        # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
+        # de nicio unealtă reală.
+        global _ultima_categorie_vocal
+        if este_raspuns_scurt_de_continuare(text_utilizator):
+            categorie = _ultima_categorie_vocal
+            print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
+        else:
+            categorie = clasifica(text_utilizator)
+            print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
+        _ultima_categorie_vocal = categorie
+
+        eroare_de_afisat = None
+
+        # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
+        # ture (toate propozițiile răspunsului, nu doar una), ca alertele
+        # de ecran (main.py, _la_schimbare_ecran) să nu se strecoare între
+        # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
+        conversatie_activa.set()
         try:
-            client_curent = next(rotatie_clienti)
-            agent_loop_streaming(
-                client_curent, model, SYSTEM_PROMPT, istoric,
-                la_propozitie_gata=_la_propozitie,
-                flag_intrerupere=flag_intrerupere,
-            )
-        except Exception as e:
-            raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
-            print(f"[EROARE agent]: {e}")
-            traceback.print_exc()
-            try:
-                spune(raspuns_text)
-            except Exception as e_tts:
-                print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
+            if categorie == "unelte":
+                # Singura cale cu tool-calling real — Gemini, streaming nativ.
+                try:
+                    client_curent = next(rotatie_clienti)
+                    agent_loop_streaming(
+                        client_curent, model, SYSTEM_PROMPT, istoric,
+                        la_propozitie_gata=_la_propozitie,
+                        flag_intrerupere=flag_intrerupere,
+                    )
+                except Exception as e:
+                    eroare_de_afisat = e
+            else:
+                # "cod" / "conversatie" — NVIDIA întâi, FĂRĂ unelte reale.
+                mesaje_openai = istoric_la_mesaje_openai(
+                    istoric, _AVERTISMENT_NVIDIA_VOCAL + "\n\n" + SYSTEM_PROMPT
+                )
+                rezultat = (
+                    intreaba_nvidia_cod(mesaje_openai)
+                    if categorie == "cod"
+                    else intreaba_nvidia_conversatie(mesaje_openai)
+                )
+
+                if rezultat:
+                    istoric.append(
+                        types.Content(role="model", parts=[types.Part(text=rezultat)])
+                    )
+                    _vorbeste_text_pe_propozitii(rezultat, _la_propozitie)
+                else:
+                    # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
+                    print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
+                    _ultima_categorie_vocal = "unelte"
+                    try:
+                        client_curent = next(rotatie_clienti)
+                        agent_loop_streaming(
+                            client_curent, model, SYSTEM_PROMPT, istoric,
+                            la_propozitie_gata=_la_propozitie,
+                            flag_intrerupere=flag_intrerupere,
+                        )
+                    except Exception as e:
+                        eroare_de_afisat = e
+
+            if eroare_de_afisat is not None:
+                e = eroare_de_afisat
+                raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
+                print(f"[EROARE agent]: {e}")
+                traceback.print_exc()
+                try:
+                    spune(raspuns_text)
+                except Exception as e_tts:
+                    print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
+        finally:
+            # Garantăm eliberarea flag-ului indiferent de rezultat — altfel
+            # o eroare neprevăzută ar lăsa alertele de ecran blocate la
+            # coadă pentru totdeauna, crezând că o conversație e încă activă.
+            conversatie_activa.clear()
 
         if flag_intrerupere.is_set():
             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")

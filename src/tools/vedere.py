@@ -132,12 +132,18 @@ def _screenshot_bytes() -> tuple[bytes, int, int]:
     },
 )
 def vezi_ecranul(intrebare: str = "Descrie pe scurt ce se vede pe ecran."):
-    """Screenshot + analiză vizuală prin Gemini multimodal, cu fallback pe NVIDIA multimodal."""
+    """Screenshot + analiză vizuală — NVIDIA multimodal (cascadă 3 modele) întâi, Gemini ca plasă de siguranță."""
     try:
         img_bytes, _, _ = _screenshot_bytes()
     except Exception as e:
         return f"Nu am putut face screenshot: {str(e)}"
 
+    from src.core.llm_provider import intreaba_nvidia_multimodal
+    rezultat = intreaba_nvidia_multimodal(img_bytes, intrebare)
+    if rezultat:
+        return rezultat
+
+    print("[Vedere] NVIDIA multimodal indisponibil — încerc Gemini...")
     try:
         raspuns = _genereaza_cu_fallback(
             model=GEMINI_MODEL_VEDERE,
@@ -153,16 +159,7 @@ def vezi_ecranul(intrebare: str = "Descrie pe scurt ce se vede pe ecran."):
         )
         return (raspuns.text or "Nu am obținut niciun răspuns de la analiza vizuală.").strip()
     except Exception as e:
-        print(f"[Vedere] Gemini indisponibil ({str(e)[:120]}) — încerc NVIDIA multimodal...")
-        try:
-            from src.core.llm_provider import intreaba_nvidia_multimodal
-            rezultat = intreaba_nvidia_multimodal(img_bytes, intrebare)
-            if rezultat:
-                return rezultat
-        except Exception as e2:
-            print(f"[Vedere] NVIDIA multimodal a eșuat și el: {str(e2)[:120]}")
-
-        return f"Eroare la analiza ecranului (Gemini și NVIDIA indisponibile): {str(e)}"
+        return f"Eroare la analiza ecranului (NVIDIA și Gemini indisponibile): {str(e)}"
 
 
 # ==============================================================
@@ -291,12 +288,32 @@ Returnează DOAR un JSON valid (fără markdown):
 """
 
 
+def _parseaza_json_alerta(text: str) -> dict | None:
+    """Extrage {"tip", "mesaj"} dintr-un răspuns text, tolerant la ```json fences."""
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+    try:
+        date = json.loads(text.strip())
+    except (json.JSONDecodeError, IndexError):
+        return None
+
+    tip = str(date.get("tip", "nimic")).strip().lower()
+    if tip not in ("urgent", "comentariu", "nimic"):
+        tip = "nimic"
+    return {"tip": tip, "mesaj": str(date.get("mesaj", "")).strip()}
+
+
 def analizeaza_ecran_complet() -> dict:
     """
     Analizează ecranul curent și clasifică ce vede în "urgent" (alertă,
     ca înainte), "comentariu" (remarcă de personalitate, non-urgentă) sau
-    "nimic". UN SINGUR apel Gemini, nu dublăm costul API pentru cele două
-    categorii.
+    "nimic". NVIDIA multimodal (cascadă 3 modele) ÎNTÂI — rulează la
+    fiecare 3 secunde din monitor_ecran.py, deci e cel mai mare consumator
+    de cerere; Gemini rămâne doar plasă de siguranță dacă NVIDIA eșuează
+    complet.
 
     Returnează:
         {"tip": "urgent"|"comentariu"|"nimic", "mesaj": "..."}
@@ -313,6 +330,16 @@ def analizeaza_ecran_complet() -> dict:
         print(f"[Vedere] Eroare screenshot pentru analiză: {e}")
         return gol
 
+    from src.core.llm_provider import intreaba_nvidia_multimodal
+    text_nvidia = intreaba_nvidia_multimodal(img_bytes, _PROMPT_ALERTA)
+    if text_nvidia:
+        rezultat = _parseaza_json_alerta(text_nvidia)
+        if rezultat is not None:
+            return rezultat
+        print("[Vedere] NVIDIA a răspuns, dar JSON-ul nu a putut fi parsat — încerc Gemini...")
+    else:
+        print("[Vedere] NVIDIA multimodal indisponibil pentru monitorizare — încerc Gemini...")
+
     try:
         raspuns = _genereaza_cu_fallback(
             model=GEMINI_MODEL_VEDERE,
@@ -327,18 +354,8 @@ def analizeaza_ecran_complet() -> dict:
             ],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
-        text = (raspuns.text or "").strip()
-        if text.startswith("```"):
-            text = text.split("```")[1]
-            if text.startswith("json"):
-                text = text[4:]
-        date = json.loads(text.strip())
-
-        tip = str(date.get("tip", "nimic")).strip().lower()
-        if tip not in ("urgent", "comentariu", "nimic"):
-            tip = "nimic"
-
-        return {"tip": tip, "mesaj": str(date.get("mesaj", "")).strip()}
+        rezultat = _parseaza_json_alerta(raspuns.text or "")
+        return rezultat if rezultat is not None else gol
     except Exception as e:
         print(f"[Vedere] Eroare la analiza ecranului: {e}")
         return gol

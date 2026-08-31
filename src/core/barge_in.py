@@ -58,10 +58,11 @@ def _asculta_pentru_intrerupere(stop_flag: threading.Event, a_intrerupt: threadi
     blocuri_consecutive = 0
 
     try:
-        # Determinăm rata nativă a device-ului de captură (echo-cancel-source)
-        # și citim blocuri la acea rată. Convertim fiecare bloc la lungimea
-        # cerută de Silero (MARIME_BLOC = 512 la 16kHz) folosind
-        # resample_poly pentru filtrare anti-aliasing.
+        # Determinăm rata nativă ȘI numărul real de canale ale device-ului
+        # de captură (echo-cancel-source e STEREO — 2 canale — pe sistemul
+        # tău, confirmat cu `pactl list sources short`). Citim blocuri la
+        # acea rată/canale, apoi re-eșantionăm/downmixăm noi manual către
+        # ce cere Silero (MARIME_BLOC = 512 la 16kHz, mono).
         try:
             if isinstance(DEVICE_CAPTURA_MIC, int):
                 dev_idx = DEVICE_CAPTURA_MIC
@@ -70,23 +71,37 @@ def _asculta_pentru_intrerupere(stop_flag: threading.Event, a_intrerupt: threadi
 
             info = sd.query_devices(dev_idx)
             rata_nativa = int(info.get("default_samplerate", SAMPLE_RATE))
+            canale_native = max(1, int(info.get("max_input_channels", 1) or 1))
         except Exception:
-            # Dacă ceva e în neregulă, cădem înapoi la SAMPLE_RATE implicit
+            # Dacă ceva e în neregulă, cădem înapoi la valorile implicite
             rata_nativa = SAMPLE_RATE
+            canale_native = 1
 
         durata_bloc_sec = MARIME_BLOC / SAMPLE_RATE
         bloc_nativ = max(1, int(round(durata_bloc_sec * rata_nativa)))
 
+        # IMPORTANT: cerem EXPLICIT canale_native (nu 1 fix). Forțarea
+        # channels=1 pe un device stereo (echo-cancel-source, 2ch) obligă
+        # PortAudio/PipeWire să facă un downmix intern care, pe acest
+        # sistem, scrie dincolo de bufferul numpy alocat pentru citire —
+        # exact sursa lui `malloc(): unsorted double linked list corrupted`.
+        # Downmix-ul îl facem noi, manual, mai jos — sigur, în numpy pur.
         with safe_input_stream(
             samplerate=rata_nativa,
-            channels=1,
+            channels=canale_native,
             dtype="float32",
             blocksize=bloc_nativ,
             device=DEVICE_CAPTURA_MIC,
         ) as stream:
             while not stop_flag.is_set():
                 bloc, _ = stream.read(bloc_nativ)
-                bloc_flat = bloc.flatten()
+
+                # Downmix manual la mono (medie pe canale) dacă e nevoie —
+                # sigur, fără nicio implicare a PortAudio în conversie.
+                if bloc.ndim == 2 and bloc.shape[1] > 1:
+                    bloc_flat = bloc.mean(axis=1).astype(np.float32)
+                else:
+                    bloc_flat = bloc.flatten()
 
                 # Dacă trebuie, re-eșantionăm către MARIME_BLOC (512 la 16kHz)
                 if bloc_nativ != MARIME_BLOC or rata_nativa != SAMPLE_RATE:
@@ -160,7 +175,13 @@ def vorbeste_cu_intrerupere(text: str, pe_intrerupere=None) -> bool:
         print(f"[EROARE TTS]: {e}")
     finally:
         stop_flag.set()
-        thread_ascultare.join(timeout=1.0)
+        # FĂRĂ timeout: trebuie să știm SIGUR că thread-ul a ieșit din
+        # bucla lui înainte să continuăm la propoziția următoare — altfel
+        # două thread-uri de barge-in pot rula concurent, apelând modelul
+        # VAD partajat în paralel (vezi lock-ul nou din vad.py). Thread-ul
+        # verifică stop_flag după fiecare bloc citit, deci iese rapid
+        # (sub-secundă) — nu există risc real de blocare permanentă aici.
+        thread_ascultare.join()
 
     if a_intrerupt.is_set():
         if pe_intrerupere:

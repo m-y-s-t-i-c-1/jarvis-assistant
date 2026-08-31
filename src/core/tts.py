@@ -40,6 +40,7 @@ load_dotenv()
 PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
 PIPER_MODEL = os.getenv("PIPER_MODEL", "voci_piper/ro_RO-mihai-medium.onnx")
 TTS_SINK_ENV = os.getenv("TTS_SINK", "").strip() or None
+ALLOW_SOUNDDEVICE_TTS = os.getenv("ALLOW_SOUNDDEVICE_TTS", "0").strip().lower() not in {"0", "false", "no", "off", ""}
 
 _stop_event = threading.Event()
 _redare_lock = threading.Lock()
@@ -276,12 +277,24 @@ def _reda_cu_sounddevice(cale_wav: str) -> None:
 
 
 def _reda_fisier_wav(cale_wav: str) -> None:
-    """Redă un fișier WAV: player extern întâi, sounddevice ca plasă de siguranță."""
+    """Redă un fișier WAV: player extern întâi; fără el, evită sounddevice pe sisteme fragile."""
     if _reda_cu_player_extern(cale_wav):
         return
+
+    if not ALLOW_SOUNDDEVICE_TTS:
+        print(
+            "[TTS] Niciun player extern disponibil/utilizabil "
+            "(paplay/pw-play/ffplay/afplay/aplay). "
+            "Sounddevice e dezactivat implicit pentru a evita crash-ul nativ "
+            "PipeWire/PortAudio. Setează ALLOW_SOUNDDEVICE_TTS=1 doar dacă ai "
+            "testat cu atenție sistemul audio."
+        )
+        return
+
     print(
         "[TTS] Niciun player extern disponibil/utilizabil "
-        "(paplay/pw-play/ffplay/afplay/aplay) — fallback sounddevice."
+        "(paplay/pw-play/ffplay/afplay/aplay) — fallback sounddevice activat "
+        "după opt-in explicit."
     )
     _reda_cu_sounddevice(cale_wav)
 

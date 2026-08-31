@@ -24,6 +24,7 @@ ca să aplice un prag PROPRIU, mai strict decât cel de conversație normală
 acustic al lui Jarvis în timpul redării TTS.
 """
 
+import threading
 import numpy as np
 import sounddevice as sd
 import torch
@@ -61,16 +62,32 @@ class DetectorActivitateVocala:
         )
         self.model.eval()
 
+        # IMPORTANT: acest model e un singleton global, apelat din mai multe
+        # thread-uri (bucla principală VAD ȘI thread-urile de barge-in, câte
+        # unul nou per propoziție — vezi barge_in.py). Silero-VAD e STATEFUL
+        # (păstrează stare internă între apeluri) — apeluri concurente pe
+        # ACEEAȘI instanță de pe thread-uri diferite fac cursă de date pe
+        # tensorii interni și pot coropme alocatorul nativ:
+        #   malloc(): unsorted double linked list corrupted → abort
+        # Acest lock serializează TOATE apelurile către model, indiferent de
+        # thread. Cost neglijabil (inferența e sub-milisecundă), dar
+        # elimină complet clasa asta de crash.
+        self._lock_model = threading.Lock()
+
     def probabilitate_vorbire(self, bloc_audio: np.ndarray) -> float:
         """
         Returnează probabilitatea BRUTĂ de vorbire (0.0-1.0) pentru un bloc
         audio, FĂRĂ niciun prag aplicat — decizia "e vorbire sau nu" rămâne
         la apelant. Folosit de barge_in.py, care aplică un prag propriu,
         mai strict decât PRAG_PROBABILITATE_VORBIRE de mai jos.
+
+        Thread-safe: serializat prin _lock_model (vezi comentariul din
+        __init__ — modelul e stateful și e folosit din mai multe thread-uri).
         """
         tensor = torch.from_numpy(bloc_audio).float()
-        with torch.no_grad():
-            return self.model(tensor, SAMPLE_RATE).item()
+        with self._lock_model:
+            with torch.no_grad():
+                return self.model(tensor, SAMPLE_RATE).item()
 
     def _e_vorbire(self, bloc_audio: np.ndarray) -> bool:
         """Verifică dacă un singur bloc de audio conține vorbire (prag standard)."""

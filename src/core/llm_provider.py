@@ -4,8 +4,11 @@ Provideri Externi — NVIDIA (dedicat pe categorie) + Cascadă Finală (Task 6.4
 Arhitectură (confirmată):
     - Gemini (3 chei): EXCLUSIV pentru tool-calling și localizare pe ecran.
     - NVIDIA "Conversație" (4 chei, rotative): asociate cu 4 modele distincte.
-    - NVIDIA "Cod" (1 cheie): glm-5.2 pentru întrebări tehnice/de programare.
-    - NVIDIA "Multimodal" (1 cheie): minimax-m3 pentru vedere generală.
+    - NVIDIA "Cod" (1-3 chei, cascadă de 3 modele): deepseek-v4-pro-0813
+      -> qwen3-coder-480b -> glm-5.2, pentru întrebări tehnice/de programare.
+    - NVIDIA "Multimodal" (1 cheie, cascadă de 3 modele): minimax-m3 ->
+      llama-4-maverick -> nemotron-3-nano-omni, pentru vedere ecran —
+      folosit ÎNAINTEA lui Gemini (vezi src/tools/vedere.py).
     - Groq, OpenRouter, Bytez: cascada de siguranță.
 """
 
@@ -19,7 +22,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TIMEOUT_PER_APEL = 45
+TIMEOUT_PER_APEL = 18
 
 _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
@@ -35,7 +38,9 @@ _CONFIG_CONVERSATIE = [
         }
     },
     {
-        "model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        # ÎNLOCUIT 2026-08-30: "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+        # a fost retras de NVIDIA (410 Gone, end-of-life 2026-08-26).
+        "model": "meta/llama-4-maverick-17b-128e-instruct",
         "params": {
             "temperature": 0.6,
             "top_p": 0.95,
@@ -43,7 +48,9 @@ _CONFIG_CONVERSATIE = [
         }
     },
     {
-        "model": "meta/llama-3.1-8b-instruct",
+        # ÎNLOCUIT 2026-08-30: "meta/llama-3.1-8b-instruct" a fost retras
+        # de NVIDIA (410 Gone, end-of-life 2026-08-26).
+        "model": "meta/llama-3.1-70b-instruct",
         "params": {
             "temperature": 0.2,
             "top_p": 0.7,
@@ -59,6 +66,16 @@ _CONFIG_CONVERSATIE = [
         }
     }
 ]
+
+# Catalogul NVIDIA NIM se schimbă frecvent — modele pot fi retrase (410
+# Gone) fără avertisment lung. Cache-uim aici orice model care ne-a
+# răspuns vreodată cu 410 în sesiunea curentă, ca să-l sărim automat la
+# următoarele apeluri, în loc să irosim un apel + 45s de timeout posibil
+# pe un model deja mort. NU rezolvă modelul mort din config (tot trebuie
+# actualizat manual, vezi comentariile de mai sus), dar reduce impactul
+# până atunci. Dacă vezi frecvent modele sărite aici, verifică lista
+# curentă la build.nvidia.com/models și actualizează _CONFIG_CONVERSATIE.
+_modele_nvidia_retrase: set[str] = set()
 
 _nvidia_chei_conversatie = [
     os.getenv(f"NVIDIA_API_KEY_CONVERSATION_{i}") for i in range(1, 5)
@@ -82,13 +99,64 @@ _NVIDIA_MODEL_CONVERSATIE_DEFAULT = os.getenv(
     "NVIDIA_MODEL_CONVERSATIE", "nvidia/llama-3.3-nemotron-super-49b-v1.5"
 )
 
-# ── NVIDIA — Cod (1 cheie) ───────────────────────────────────────────────────
-_NVIDIA_CHEIE_CODING = os.getenv("NVIDIA_API_KEY_CODING")
-_NVIDIA_MODEL_CODING = os.getenv("NVIDIA_MODEL_CODING", "z-ai/glm-5.2")
+# ── NVIDIA — Cod (1-3 chei x 2 modele) ───────────────────────────────────────
+# Citim NVIDIA_API_KEY_CODING (fără sufix) + NVIDIA_API_KEY_CODING_2,
+# _3 ... — la fel ca la conversație. Fiecare cheie e o găleată SEPARATĂ
+# de ~40 cereri/minut. Structura e identică cu cea de la multimodal:
+# pentru fiecare cheie, încercăm pe rând toate modelele din
+# _MODELE_CODING; pe 429 sărim direct la următoarea cheie (nu la
+# următorul model pe aceeași cheie — vezi LimitaDeRataNvidia).
+_nvidia_chei_coding = [
+    os.getenv(f"NVIDIA_API_KEY_CODING{'' if i == 0 else f'_{i+1}'}")
+    for i in range(3)
+]
+_nvidia_chei_coding = [k for k in _nvidia_chei_coding if k]
 
-# ── NVIDIA — Multimodal / vedere (1 cheie) ──────────────────────────────────
-_NVIDIA_CHEIE_MULTIMODAL = os.getenv("NVIDIA_API_KEY_MULTIMODAL")
-_NVIDIA_MODEL_MULTIMODAL = os.getenv("NVIDIA_MODEL_MULTIMODAL", "minimaxai/minimax-m3")
+_MODELE_CODING = [
+    os.getenv("NVIDIA_MODEL_CODING", "deepseek-ai/deepseek-v4-pro-0813"),
+    "qwen/qwen3-coder-480b",
+    "z-ai/glm-5.2",
+]
+_MODELE_CODING = list(dict.fromkeys(_MODELE_CODING))
+
+# ── NVIDIA — Multimodal / vedere (1-3 chei x 3 modele) ──────────────────────
+# O cheie NVIDIA funcționează cu ORICE model din catalog (nu e legată de
+# modelul pe care ai apăsat când ai generat-o) — deci putem combina mai
+# multe chei CU mai multe modele. Structura: pentru fiecare cheie
+# disponibilă, încercăm pe rând toate modelele din _MODELE_MULTIMODAL.
+# Dacă o cheie dă 429 (limită de rată), oprim cascada de modele PE ACEA
+# CHEIE (vezi LimitaDeRataNvidia mai jos — alt model pe aceeași cheie tot
+# 429 ar da) și trecem la următoarea cheie, cu propria ei cascadă de
+# modele de la capăt.
+_nvidia_chei_multimodal = [
+    os.getenv(f"NVIDIA_API_KEY_MULTIMODAL{'' if i == 0 else f'_{i+1}'}")
+    for i in range(3)
+]
+_nvidia_chei_multimodal = [k for k in _nvidia_chei_multimodal if k]
+
+_MODELE_MULTIMODAL = [
+    os.getenv("NVIDIA_MODEL_MULTIMODAL", "minimaxai/minimax-m3"),
+    "meta/llama-4-maverick-17b-128e-instruct",
+    "nvidia/nemotron-3-nano-omni",
+]
+# Eliminăm duplicate păstrând ordinea (dacă cineva a pus în .env exact
+# unul din cele două modele adăugate implicit mai jos)
+_MODELE_MULTIMODAL = list(dict.fromkeys(_MODELE_MULTIMODAL))
+
+
+
+class LimitaDeRataNvidia(Exception):
+    """
+    Ridicată când o cheie NVIDIA a atins limita de RPM (429). Limita e
+    GLOBALĂ pe cheie (~40 cereri/minut, partajată între TOATE modelele
+    apelate cu acea cheie) — deci, spre deosebire de 410 (model retras)
+    sau 503/timeout (problemă temporară a unui model anume), încercarea
+    altui model CU ACEEAȘI CHEIE nu ajută deloc, tot 429 va da. Cascadele
+    de mai jos prind explicit această excepție și opresc imediat
+    încercarea altor modele pe aceeași cheie, trecând direct la fallback
+    (altă cheie sau alt provider).
+    """
+    pass
 
 
 def _apel_chat_openai(
@@ -141,6 +209,14 @@ def _apel_chat_openai(
         return None
     except requests.exceptions.HTTPError as e:
         print(f"[NVIDIA] HTTP {e.response.status_code} pentru '{model}': {e.response.text[:200]}")
+        if e.response.status_code == 410:
+            _modele_nvidia_retrase.add(model)
+            print(f"[NVIDIA] Model '{model}' marcat ca RETRAS — va fi sărit automat de acum înainte.")
+            return None
+        if e.response.status_code == 429:
+            # Limită de rată pe CHEIE, nu pe model — alt model cu aceeași
+            # cheie va da tot 429. Semnalăm asta distinct cascadelor.
+            raise LimitaDeRataNvidia(f"Cheia a atins limita de RPM (429) la modelul '{model}'")
         return None
     except Exception as e:
         print(f"[NVIDIA] Eroare la '{model}': {str(e)[:200]}")
@@ -208,16 +284,27 @@ def intreaba_nvidia_conversatie(
         combo = next(_nvidia_rotatie_conversatie)
         cheie, model, params = combo["cheie"], combo["model"], combo["params"]
 
+        if model in _modele_nvidia_retrase:
+            print(f"[NVIDIA] Sar peste '{model}' (marcat anterior ca retras — 410 Gone)")
+            continue
+
         print(f"[NVIDIA] Apelează Conversație: Model '{model}'")
 
-        rezultat = _apel_chat_openai(
-            _NVIDIA_BASE_URL,
-            cheie,
-            model,
-            mesaje,
-            stream=stream,
-            **params
-        )
+        try:
+            rezultat = _apel_chat_openai(
+                _NVIDIA_BASE_URL,
+                cheie,
+                model,
+                mesaje,
+                stream=stream,
+                **params
+            )
+        except LimitaDeRataNvidia as e:
+            # Fiecare combo are o cheie DIFERITĂ (NVIDIA_API_KEY_CONVERSATION_1..4)
+            # — un 429 pe una nu înseamnă că următoarea (altă cheie) va da
+            # tot 429. Continuăm normal la următoarea combinație din rotație.
+            print(f"[NVIDIA] {e} — încerc următoarea cheie/model")
+            continue
 
         if rezultat is None:
             continue
@@ -238,11 +325,12 @@ def intreaba_nvidia_cod(
     stream: bool = False,
     **kwargs
 ) -> str | None:
-    if not _NVIDIA_CHEIE_CODING:
-        print("[NVIDIA] Cheia de coding nu este configurată!")
+    if not _nvidia_chei_coding:
+        print("[NVIDIA] Nicio cheie de coding configurată!")
         return None
 
-    # Optimizări extrase din snippet pentru z-ai/glm-5.2
+    # Optimizări extrase din snippet pentru z-ai/glm-5.2 — potrivite și
+    # pentru celelalte modele de coding din cascadă
     params = {
         "temperature": 1.0,
         "top_p": 1.0,
@@ -250,13 +338,29 @@ def intreaba_nvidia_cod(
         "seed": 42
     }
 
-    print(f"[NVIDIA] Apelează Coding: Model '{_NVIDIA_MODEL_CODING}'")
-    rezultat = _apel_chat_openai(
-        _NVIDIA_BASE_URL, _NVIDIA_CHEIE_CODING, _NVIDIA_MODEL_CODING, mesaje, stream=stream, **params
-    )
+    for index_cheie, cheie in enumerate(_nvidia_chei_coding):
+        for model in _MODELE_CODING:
+            if model in _modele_nvidia_retrase:
+                print(f"[NVIDIA] Sar peste coding '{model}' (marcat anterior ca retras — 410 Gone)")
+                continue
 
-    if rezultat:
-        return _proceseaza_stream(rezultat) if stream else _extrage_continut(rezultat)
+            print(f"[NVIDIA] Apelează Coding (cheie #{index_cheie + 1}): Model '{model}'")
+            try:
+                rezultat = _apel_chat_openai(
+                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=stream, **params
+                )
+            except LimitaDeRataNvidia as e:
+                # Toate modelele din bucla interioară folosesc ACEEAȘI
+                # cheie — oprim doar bucla interioară și trecem la
+                # cheia următoare, cu propria ei cascadă de la capăt.
+                print(f"[NVIDIA] {e} — trec la următoarea cheie de coding")
+                break
+
+            if rezultat:
+                continut = _proceseaza_stream(rezultat) if stream else _extrage_continut(rezultat)
+                if continut:
+                    return continut
+
     return None
 
 
@@ -273,11 +377,11 @@ def intreaba_nvidia_multimodal(
     intrebare: str,
     **kwargs
 ) -> str | None:
-    if not _NVIDIA_CHEIE_MULTIMODAL:
-        print("[NVIDIA] Cheia multimodal nu este configurată!")
+    if not _nvidia_chei_multimodal:
+        print("[NVIDIA] Nicio cheie multimodal configurată!")
         return None
 
-    # Optimizări din snippet pentru minimax-m3
+    # Optimizări generice, potrivite pentru toate modelele din cascadă
     params = {"temperature": 1.0, "top_p": 0.95, "max_tokens": 8192}
 
     mime_type = _detecteaza_mime_type(imagine_bytes)
@@ -288,18 +392,40 @@ def intreaba_nvidia_multimodal(
         {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{imagine_b64}"}}
     ]}]
 
-    print(f"[NVIDIA] Apelează Multimodal: Model '{_NVIDIA_MODEL_MULTIMODAL}'")
-    rezultat = _apel_chat_openai(
-        _NVIDIA_BASE_URL, _NVIDIA_CHEIE_MULTIMODAL, _NVIDIA_MODEL_MULTIMODAL, mesaje, stream=False, **params
-    )
+    for index_cheie, cheie in enumerate(_nvidia_chei_multimodal):
+        for model in _MODELE_MULTIMODAL:
+            if model in _modele_nvidia_retrase:
+                print(f"[NVIDIA] Sar peste multimodal '{model}' (marcat anterior ca retras — 410 Gone)")
+                continue
 
-    if rezultat: return _extrage_continut(rezultat)
+            print(f"[NVIDIA] Apelează Multimodal (cheie #{index_cheie + 1}): Model '{model}'")
+            try:
+                rezultat = _apel_chat_openai(
+                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=False, **params
+                )
+            except LimitaDeRataNvidia as e:
+                # Toate modelele din bucla interioară folosesc ACEEAȘI
+                # cheie — un 429 aici înseamnă limita de RPM a CHEII, nu a
+                # modelului. Oprim doar bucla interioară (alt model pe
+                # aceeași cheie tot 429 ar da) și trecem la cheia
+                # următoare, cu propria ei cascadă de modele de la capăt.
+                print(f"[NVIDIA] {e} — trec la următoarea cheie multimodal")
+                break
+
+            if rezultat:
+                continut = _extrage_continut(rezultat)
+                if continut:
+                    return continut
+
+    print(f"[NVIDIA] Cascada multimodal a eșuat pe toate cele {len(_nvidia_chei_multimodal)} chei.")
     return None
 
 
 def _orice_cheie_nvidia() -> str | None:
     if _nvidia_chei_conversatie: return _nvidia_chei_conversatie[0]
-    return _NVIDIA_CHEIE_CODING or _NVIDIA_CHEIE_MULTIMODAL
+    if _nvidia_chei_coding: return _nvidia_chei_coding[0]
+    if _nvidia_chei_multimodal: return _nvidia_chei_multimodal[0]
+    return None
 
 
 _PROVIDERI_FINALI = [
@@ -342,13 +468,19 @@ def ruleaza_cascada_externa(istoric: list, system_prompt: str, *, temperature: f
         cheie = provider["cheie"]()
         if not cheie: continue
         print(f"[Cascadă finală] Încerc {provider['nume']}...")
-        rezultat = _apel_chat_openai(
-            provider["base_url"], cheie, provider["model"], mesaje, temperature=temperature, max_tokens=max_tokens
-        )
+        try:
+            rezultat = _apel_chat_openai(
+                provider["base_url"], cheie, provider["model"], mesaje, temperature=temperature, max_tokens=max_tokens
+            )
+        except LimitaDeRataNvidia as e:
+            # Fiecare provider din listă e un serviciu/cheie complet
+            # separat — un 429 la unul nu spune nimic despre următorul.
+            print(f"[Cascadă finală] {provider['nume']}: {e} — încerc următorul provider")
+            continue
         if rezultat and isinstance(rezultat, dict):
             content = _extrage_continut(rezultat)
             if content:
                 print(f"[Cascadă finală] {provider['nume']} a răspuns cu succes.")
                 return content
     print("[Cascadă finală] Toți providerii au eșuat.")
-    return Nones
+    return None
