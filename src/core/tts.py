@@ -27,7 +27,9 @@ Configurare în .env (opțional):
 from __future__ import annotations
 
 import os
+import json
 import shutil
+import atexit
 import tempfile
 import threading
 import subprocess
@@ -40,12 +42,29 @@ load_dotenv()
 PIPER_BINARY = os.getenv("PIPER_BINARY", "piper")
 PIPER_MODEL = os.getenv("PIPER_MODEL", "voci_piper/ro_RO-mihai-medium.onnx")
 TTS_SINK_ENV = os.getenv("TTS_SINK", "").strip() or None
-ALLOW_SOUNDDEVICE_TTS = os.getenv("ALLOW_SOUNDDEVICE_TTS", "0").strip().lower() not in {"0", "false", "no", "off", ""}
 
 _stop_event = threading.Event()
 _redare_lock = threading.Lock()
 _player_proc: subprocess.Popen | None = None
 _player_lock = threading.Lock()
+
+# ── Piper persistent (proces cald, model încărcat o singură dată) ──────────
+# Piper CLI reîncarcă modelul ONNX de pe disc la fiecare pornire — cost
+# real pentru fiecare propoziție dintr-un răspuns. Cu --json-input, Piper
+# rulează ca un singur proces care citește linii JSON de pe stdin
+# ({"text": ..., "output_file": ...}) și ține modelul cald între ele.
+# Piper NU confirmă explicit "gata" pentru fiecare cerere — detectăm
+# finalizarea prin apariția fișierului + stabilizarea dimensiunii lui.
+# Dacă procesul persistent are orice problemă (nu pornește, se blochează,
+# moare), cădem AUTOMAT pe metoda veche (subprocess.run per propoziție,
+# dovedită stabilă) — niciodată nu rămânem blocați din cauza asta.
+_piper_persistent_proc: subprocess.Popen | None = None
+_piper_persistent_lock = threading.Lock()
+_piper_persistent_dezactivat = False  # odată dezactivat (eșecuri repetate), rămâne așa toată sesiunea
+_ESECURI_CONSECUTIVE_MAX = 3
+_esecuri_consecutive = 0
+_TIMEOUT_ASTEPTARE_FISIER = 10.0   # secunde — sinteza unei propoziții scurte durează mult mai puțin
+_INTERVAL_POLL_FISIER = 0.02       # 20ms — suficient de des ca să nu adauge latență vizibilă
 
 # Cache sink echo-cancel (None = necunoscut încă, False = lipsă, str = nume)
 _sink_ecou_cache: str | bool | None = None
@@ -277,26 +296,115 @@ def _reda_cu_sounddevice(cale_wav: str) -> None:
 
 
 def _reda_fisier_wav(cale_wav: str) -> None:
-    """Redă un fișier WAV: player extern întâi; fără el, evită sounddevice pe sisteme fragile."""
+    """Redă un fișier WAV: player extern întâi, sounddevice ca plasă de siguranță."""
     if _reda_cu_player_extern(cale_wav):
         return
-
-    if not ALLOW_SOUNDDEVICE_TTS:
-        print(
-            "[TTS] Niciun player extern disponibil/utilizabil "
-            "(paplay/pw-play/ffplay/afplay/aplay). "
-            "Sounddevice e dezactivat implicit pentru a evita crash-ul nativ "
-            "PipeWire/PortAudio. Setează ALLOW_SOUNDDEVICE_TTS=1 doar dacă ai "
-            "testat cu atenție sistemul audio."
-        )
-        return
-
     print(
         "[TTS] Niciun player extern disponibil/utilizabil "
-        "(paplay/pw-play/ffplay/afplay/aplay) — fallback sounddevice activat "
-        "după opt-in explicit."
+        "(paplay/pw-play/ffplay/afplay/aplay) — fallback sounddevice."
     )
     _reda_cu_sounddevice(cale_wav)
+
+
+def _porneste_piper_persistent() -> subprocess.Popen | None:
+    """Pornește (dacă nu rulează deja) procesul Piper persistent cu --json-input."""
+    global _piper_persistent_proc
+
+    if _piper_persistent_proc is not None and _piper_persistent_proc.poll() is None:
+        return _piper_persistent_proc
+
+    try:
+        proc = subprocess.Popen(
+            [PIPER_BINARY, "--model", PIPER_MODEL, "--json-input"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        return None
+
+    _piper_persistent_proc = proc
+    return proc
+
+
+def _opreste_piper_persistent() -> None:
+    """Oprește procesul Piper persistent, dacă rulează."""
+    global _piper_persistent_proc
+    proc = _piper_persistent_proc
+    if proc is None:
+        return
+    try:
+        if proc.stdin:
+            proc.stdin.close()
+        proc.terminate()
+        proc.wait(timeout=2.0)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    finally:
+        _piper_persistent_proc = None
+
+
+atexit.register(_opreste_piper_persistent)
+
+
+def _asteapta_fisier_stabil(cale: str, timeout: float) -> bool:
+    """
+    Așteaptă ca `cale` să existe ȘI dimensiunea ei să rămână neschimbată
+    la două verificări consecutive — semn că Piper a terminat de scris
+    WAV-ul (nu are alt mecanism de confirmare în --json-input).
+    """
+    inceput = time.time()
+    dimensiune_anterioara = -1
+
+    while time.time() - inceput < timeout:
+        if os.path.exists(cale):
+            try:
+                dimensiune = os.path.getsize(cale)
+            except OSError:
+                dimensiune = -1
+
+            if dimensiune > 0 and dimensiune == dimensiune_anterioara:
+                return True
+            dimensiune_anterioara = dimensiune
+
+        time.sleep(_INTERVAL_POLL_FISIER)
+
+    return False
+
+
+def _sintetizeaza_cu_piper_persistent(text: str, cale_tmp: str) -> bool:
+    """
+    Trimite o cerere de sinteză procesului Piper persistent. Returnează
+    True dacă fișierul WAV a fost scris cu succes, False la orice problemă
+    (apelantul cade automat pe subprocess.run per-propoziție).
+    """
+    global _esecuri_consecutive
+
+    proc = _porneste_piper_persistent()
+    if proc is None or proc.stdin is None:
+        return False
+
+    cerere = json.dumps({"text": text, "output_file": cale_tmp}) + "\n"
+
+    try:
+        proc.stdin.write(cerere.encode("utf-8"))
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError):
+        # Procesul a murit — îl curățăm, următorul apel va încerca să-l repornească
+        _opreste_piper_persistent()
+        return False
+
+    if not _asteapta_fisier_stabil(cale_tmp, _TIMEOUT_ASTEPTARE_FISIER):
+        print(f"[TTS] Piper persistent nu a produs fișierul în {_TIMEOUT_ASTEPTARE_FISIER}s — "
+              f"posibil proces blocat, îl repornesc.")
+        _opreste_piper_persistent()
+        return False
+
+    _esecuri_consecutive = 0
+    return True
 
 
 def spune(text: str) -> None:
@@ -305,6 +413,8 @@ def spune(text: str) -> None:
 
     Piper are nevoie de seek() pentru headerul WAV, deci fișier temporar.
     """
+    global _esecuri_consecutive, _piper_persistent_dezactivat
+
     if not text or not text.strip():
         return
 
@@ -315,32 +425,49 @@ def spune(text: str) -> None:
             cale_tmp = tmp.name
 
         try:
-            try:
-                rezultat = subprocess.run(
-                    [
-                        PIPER_BINARY,
-                        "--model",
-                        PIPER_MODEL,
-                        "--output-file",
-                        cale_tmp,
-                    ],
-                    input=text.encode("utf-8"),
-                    capture_output=True,
-                    timeout=30,
-                )
-            except FileNotFoundError:
-                raise RuntimeError(
-                    f"Binarul Piper nu a fost găsit: '{PIPER_BINARY}'. "
-                    f"Pune calea completă în PIPER_BINARY din .env sau adaugă piper în PATH."
-                )
-            except subprocess.TimeoutExpired:
-                raise RuntimeError("Piper a depășit limita de timp. Textul e prea lung?")
+            piper_ok = False
+            _start_sinteza = time.perf_counter()
 
-            if rezultat.returncode != 0:
-                eroare = rezultat.stderr.decode("utf-8", errors="replace").strip()
-                raise RuntimeError(
-                    f"Piper a returnat eroare (cod {rezultat.returncode}): {eroare}"
-                )
+            if not _piper_persistent_dezactivat:
+                piper_ok = _sintetizeaza_cu_piper_persistent(text, cale_tmp)
+                if not piper_ok:
+                    _esecuri_consecutive += 1
+                    if _esecuri_consecutive >= _ESECURI_CONSECUTIVE_MAX:
+                        _piper_persistent_dezactivat = True
+                        print(f"[TTS] Piper persistent a eșuat de {_ESECURI_CONSECUTIVE_MAX} ori la rând — "
+                              f"dezactivat pentru restul sesiunii, rămân pe modul clasic (un proces per propoziție).")
+
+            if not piper_ok:
+                # Fallback: metoda veche, dovedită stabilă — un proces Piper nou per propoziție
+                try:
+                    rezultat = subprocess.run(
+                        [
+                            PIPER_BINARY,
+                            "--model",
+                            PIPER_MODEL,
+                            "--output-file",
+                            cale_tmp,
+                        ],
+                        input=text.encode("utf-8"),
+                        capture_output=True,
+                        timeout=30,
+                    )
+                except FileNotFoundError:
+                    raise RuntimeError(
+                        f"Binarul Piper nu a fost găsit: '{PIPER_BINARY}'. "
+                        f"Pune calea completă în PIPER_BINARY din .env sau adaugă piper în PATH."
+                    )
+                except subprocess.TimeoutExpired:
+                    raise RuntimeError("Piper a depășit limita de timp. Textul e prea lung?")
+
+                if rezultat.returncode != 0:
+                    eroare = rezultat.stderr.decode("utf-8", errors="replace").strip()
+                    raise RuntimeError(
+                        f"Piper a returnat eroare (cod {rezultat.returncode}): {eroare}"
+                    )
+
+            metoda = "persistent" if piper_ok else "clasic (proces nou)"
+            print(f"[TIMP] Sinteză Piper ({metoda}): {time.perf_counter() - _start_sinteza:.2f}s")
 
             if not os.path.getsize(cale_tmp):
                 raise RuntimeError(
@@ -348,7 +475,9 @@ def spune(text: str) -> None:
                     "Verifică modelul: PIPER_MODEL din .env sau calea hardcodată."
                 )
 
+            _start_redare = time.perf_counter()
             _reda_fisier_wav(cale_tmp)
+            print(f"[TIMP] Redare audio: {time.perf_counter() - _start_redare:.2f}s")
         finally:
             try:
                 os.unlink(cale_tmp)

@@ -11,6 +11,7 @@ necesară — descărcarea (prima rulare) durează ceva, rulările următoare
 sunt instant din cache local (~/.cache/huggingface/).
 """
 
+import time
 import numpy as np
 from faster_whisper import WhisperModel
 
@@ -62,6 +63,7 @@ def transcrie(audio: np.ndarray) -> str:
     # faster-whisper vrea audio 1D, nu (n_samples, 1)
     audio_flat = audio.flatten() if audio.ndim > 1 else audio
 
+    _start = time.perf_counter()
     segmente, info = model.transcribe(
         audio_flat,
         language=LIMBA,
@@ -74,6 +76,7 @@ def transcrie(audio: np.ndarray) -> str:
 
     # segmente e un generator — trebuie consumat ca să obținem textul
     text_complet = " ".join(segment.text.strip() for segment in segmente)
+    print(f"[TIMP] Transcriere Whisper: {time.perf_counter() - _start:.2f}s")
 
     return text_complet.strip()
 

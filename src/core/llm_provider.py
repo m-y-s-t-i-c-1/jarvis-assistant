@@ -1,18 +1,22 @@
 """
 Provideri Externi — NVIDIA (dedicat pe categorie) + Cascadă Finală (Task 6.4)
 
-Arhitectură (confirmată):
+Arhitectură (confirmată prin `python -m src.core.llm_provider` — lista
+REALĂ de modele a contului, nu documentație/articole indirecte, care s-au
+dovedit greșite de mai multe ori):
     - Gemini (3 chei): EXCLUSIV pentru tool-calling și localizare pe ecran.
-    - NVIDIA "Conversație" (4 chei, rotative): asociate cu 4 modele distincte.
+    - NVIDIA "Conversație" (4 chei, cascadă de 3 modele distincte):
+      nemotron-3.5-lightning -> kimi-k2.6 -> gpt-oss-120b -> nemotron-3.5-lightning.
     - NVIDIA "Cod" (1-3 chei, cascadă de 3 modele): deepseek-v4-pro-0813
-      -> qwen3-coder-480b -> glm-5.2, pentru întrebări tehnice/de programare.
-    - NVIDIA "Multimodal" (1 cheie, cascadă de 3 modele): minimax-m3 ->
-      llama-4-maverick -> nemotron-3-nano-omni, pentru vedere ecran —
-      folosit ÎNAINTEA lui Gemini (vezi src/tools/vedere.py).
+      -> codestral-22b -> kimi-k3, pentru întrebări tehnice/de programare.
+    - NVIDIA "Multimodal" (1-3 chei, cascadă de 3 modele): minimax-m3 ->
+      llama-3.2-90b-vision -> neva-22b, pentru vedere ecran — folosit
+      ÎNAINTEA lui Gemini (vezi src/tools/vedere.py).
     - Groq, OpenRouter, Bytez: cascada de siguranță.
 """
 
 import os
+import time
 import base64
 import itertools
 import json
@@ -38,9 +42,12 @@ _CONFIG_CONVERSATIE = [
         }
     },
     {
-        # ÎNLOCUIT 2026-08-30: "nvidia/llama-3.3-nemotron-super-49b-v1.5"
-        # a fost retras de NVIDIA (410 Gone, end-of-life 2026-08-26).
-        "model": "meta/llama-4-maverick-17b-128e-instruct",
+        # CORECTAT 2026-08-31: "z-ai/glm-4.7" NU EXISTĂ pe catalogul
+        # contului tău (confirmat cu `python -m src.core.llm_provider` —
+        # nu apare deloc în lista de 83 modele). Contul tău are acces la
+        # un set de modele diferit de ce arată documentația/articolele
+        # generale — kimi-k2.6 e confirmat REAL, prezent în listă.
+        "model": "moonshotai/kimi-k2.6",
         "params": {
             "temperature": 0.6,
             "top_p": 0.95,
@@ -48,9 +55,10 @@ _CONFIG_CONVERSATIE = [
         }
     },
     {
-        # ÎNLOCUIT 2026-08-30: "meta/llama-3.1-8b-instruct" a fost retras
-        # de NVIDIA (410 Gone, end-of-life 2026-08-26).
-        "model": "meta/llama-3.1-70b-instruct",
+        # CORECTAT 2026-08-31: "mistralai/mistral-large-3-675b-instruct-2512"
+        # NU EXISTĂ pe catalogul contului tău (confirmat, nu apare în
+        # lista de 83). "openai/gpt-oss-120b" e confirmat REAL, prezent.
+        "model": "openai/gpt-oss-120b",
         "params": {
             "temperature": 0.2,
             "top_p": 0.7,
@@ -114,8 +122,13 @@ _nvidia_chei_coding = [k for k in _nvidia_chei_coding if k]
 
 _MODELE_CODING = [
     os.getenv("NVIDIA_MODEL_CODING", "deepseek-ai/deepseek-v4-pro-0813"),
-    "qwen/qwen3-coder-480b",
-    "z-ai/glm-5.2",
+    # CORECTATE 2026-08-31: "qwen/..." și "z-ai/..." NU EXISTĂ deloc pe
+    # catalogul contului tău (niciun model din familiile astea, confirmat
+    # cu `python -m src.core.llm_provider`). Alese din lista reală:
+    # mistralai/codestral-22b-instruct-v0.1 e un model DEDICAT de cod
+    # (nu generalist adaptat), iar kimi-k3 e puternic pe coding agentic.
+    "mistralai/codestral-22b-instruct-v0.1",
+    "moonshotai/kimi-k3",
 ]
 _MODELE_CODING = list(dict.fromkeys(_MODELE_CODING))
 
@@ -136,8 +149,13 @@ _nvidia_chei_multimodal = [k for k in _nvidia_chei_multimodal if k]
 
 _MODELE_MULTIMODAL = [
     os.getenv("NVIDIA_MODEL_MULTIMODAL", "minimaxai/minimax-m3"),
-    "meta/llama-4-maverick-17b-128e-instruct",
-    "nvidia/nemotron-3-nano-omni",
+    # CORECTAT 2026-08-31: "nvidia/nemotron-nano-12b-v2-vl" NU EXISTĂ pe
+    # catalogul contului tău (confirmat, nu apare în lista de 83).
+    # meta/llama-3.2-90b-vision-instruct e un model dedicat de vedere,
+    # confirmat real în listă; nvidia/neva-22b e modelul propriu NVIDIA
+    # de vision-language, la fel confirmat real.
+    "meta/llama-3.2-90b-vision-instruct",
+    "nvidia/neva-22b",
 ]
 # Eliminăm duplicate păstrând ordinea (dacă cineva a pus în .env exact
 # unul din cele două modele adăugate implicit mai jos)
@@ -194,15 +212,18 @@ def _apel_chat_openai(
         "Content-Type": "application/json",
     }
 
+    _start = time.perf_counter()
     try:
         if stream:
             headers["Accept"] = "text/event-stream"
             raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL, stream=True)
             raspuns.raise_for_status()
+            print(f"[TIMP] NVIDIA '{model}' — până la primul byte (streaming): {time.perf_counter() - _start:.2f}s")
             return raspuns.iter_lines()
         else:
             raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL)
             raspuns.raise_for_status()
+            print(f"[TIMP] NVIDIA '{model}' — răspuns complet: {time.perf_counter() - _start:.2f}s")
             return raspuns.json()
     except requests.exceptions.Timeout:
         print(f"[NVIDIA] Timeout ({TIMEOUT_PER_APEL}s) pentru '{model}'")
@@ -484,3 +505,54 @@ def ruleaza_cascada_externa(istoric: list, system_prompt: str, *, temperature: f
                 return content
     print("[Cascadă finală] Toți providerii au eșuat.")
     return None
+
+
+def lista_modele_nvidia(cheie: str) -> list[str]:
+    """
+    Interoghează DIRECT endpoint-ul NVIDIA (/v1/models) cu o cheie dată și
+    returnează lista EXACTĂ, reală, de ID-uri de modele disponibile acum.
+
+    De ce există: modelele NVIDIA NIM se retrag/schimbă des (vezi
+    comentariile din _CONFIG_CONVERSATIE/_MODELE_CODING/_MODELE_MULTIMODAL
+    de mai sus — am nimerit greșit ID-uri de câteva ori, fie din surse
+    indirecte (articole), fie din nume aparent logice care nu corespund
+    exact slug-ului din API). Interogarea directă e singura sursă 100%
+    de încredere.
+    """
+    try:
+        raspuns = requests.get(
+            f"{_NVIDIA_BASE_URL}/models",
+            headers={"Authorization": f"Bearer {cheie}"},
+            timeout=TIMEOUT_PER_APEL,
+        )
+        raspuns.raise_for_status()
+        date = raspuns.json()
+        return sorted(m["id"] for m in date.get("data", []))
+    except Exception as e:
+        print(f"[NVIDIA] Nu am putut obține lista de modele: {e}")
+        return []
+
+
+if __name__ == "__main__":
+    # Rulează cu: python -m src.core.llm_provider
+    # Afișează lista REALĂ de modele disponibile pentru fiecare cheie NVIDIA
+    # configurată — folosește asta ca să confirmi ID-urile exacte înainte
+    # să le pui în _CONFIG_CONVERSATIE / _MODELE_CODING / _MODELE_MULTIMODAL,
+    # în loc să ghicești din articole sau documentație indirectă.
+    toate_cheile = {
+        "Conversație": _nvidia_chei_conversatie,
+        "Cod": _nvidia_chei_coding,
+        "Multimodal": _nvidia_chei_multimodal,
+    }
+
+    for categorie, chei in toate_cheile.items():
+        if not chei:
+            print(f"\n=== {categorie}: nicio cheie configurată ===")
+            continue
+
+        print(f"\n=== {categorie} (cheia #1) — modele disponibile ===")
+        modele = lista_modele_nvidia(chei[0])
+        if modele:
+            for model_id in modele:
+                print(f"  {model_id}")
+            print(f"({len(modele)} modele găsite)")

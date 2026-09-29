@@ -1,6 +1,7 @@
 """Orchestratorul principal (Task 1.6 / Task 2.4 — bucla agentului)."""
 
 import re
+import time
 from google.genai import types
 from src.core.registry import get_unelte_pentru_gemini, ruleaza_functie, CONFIRMARE_FUNCTII
 from src.core.security import trece_prin_securitate
@@ -335,7 +336,14 @@ def agent_loop_streaming(
         continut_final = None
         intrerupt = False
 
+        _start_gemini = time.perf_counter()
+        _primul_chunk_masurat = False
+
         for chunk in chat.send_message_stream(mesaj_trimis):
+            if not _primul_chunk_masurat:
+                print(f"[TIMP] Gemini — până la primul chunk: {time.perf_counter() - _start_gemini:.2f}s")
+                _primul_chunk_masurat = True
+
             if flag_intrerupere is not None and flag_intrerupere.is_set():
                 intrerupt = True
                 break
@@ -375,6 +383,8 @@ def agent_loop_streaming(
                     break
             if intrerupt:
                 break
+
+        print(f"[TIMP] Gemini — generare completă (acest pas): {time.perf_counter() - _start_gemini:.2f}s")
 
         if intrerupt:
             # Am fost întrerupți — nu mai rostim restul din buffer, nu mai
