@@ -267,7 +267,7 @@ def _reda_cu_sounddevice(cale_wav: str) -> None:
     try:
         info = sd.query_devices(device)
         rata = int(info["default_samplerate"])
-        except Exception:
+    except Exception:
         device = DEVICE_IMPLICIT
         rata = sample_rate
 
@@ -519,3 +519,4 @@ if __name__ == "__main__":
         print("[Redare completă]")
     except RuntimeError as e:
         print(f"[EROARE]: {e}")
+        sys.exit(1)
