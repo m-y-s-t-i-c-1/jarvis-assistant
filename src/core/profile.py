@@ -15,7 +15,11 @@ Utilizare:
     print(profil.bloc_context())   # injectat în system prompt
 """
 
+from pathlib import Path
+
 from src.core.database import db
+
+_RADACINA = Path(__file__).resolve().parents[2]
 
 
 # ── Cheile standard ale profilului ───────────────────────────────────────────
@@ -35,10 +39,10 @@ CHEI_PROFIL = {
     "audio_server":         "PipeWire",
 
     # Proiect curent
-    "director_proiect":     "/home/vaseoc/Downloads/jarvis-assistant-main",
+    "director_proiect":     str(_RADACINA),
     "repo_git":             "jarvis-assistant",
     "limbaj_principal":     "Python",
-    "venv_path":            "/home/vaseoc/Downloads/jarvis-assistant-main/venv",
+    "venv_path":            str(_RADACINA / "venv"),
 
     # Preferințe Jarvis
     "stil_raspuns":         "concis",        # concis / detaliat

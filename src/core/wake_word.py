@@ -29,10 +29,6 @@ from src.core.audio_io import SAMPLE_RATE, DEVICE_IMPLICIT, safe_input_stream
 
 # ── Configurare ───────────────────────────────────────────────────────────────
 
-CALE_MODEL = (
-    "/home/vaseoc/Downloads/jarvis-assistant-main/venv/lib/python3.14"
-    "/site-packages/openwakeword/resources/models/hey_jarvis_v0.1.onnx"
-)
 MODEL_CHEIE  = "hey_jarvis_v0.1"
 PRAG_DETECTIE = 0.35
 MARIME_BLOC   = 1280       # 80ms la 16kHz — recomandat de OpenWakeWord
@@ -46,8 +42,6 @@ def _cale_model_wake() -> str:
     env = os.getenv("WAKE_WORD_MODEL", "").strip()
     if env and os.path.isfile(env):
         return env
-    if os.path.isfile(CALE_MODEL):
-        return CALE_MODEL
     try:
         import openwakeword
         baza = os.path.join(
@@ -60,7 +54,11 @@ def _cale_model_wake() -> str:
             return baza
     except Exception:
         pass
-    return CALE_MODEL
+    raise FileNotFoundError(
+        "Modelul hey_jarvis_v0.1.onnx nu a fost găsit. Rulează: "
+        "python -c \"import openwakeword.utils as u; u.download_models()\" "
+        "sau setează WAKE_WORD_MODEL=/cale/către/model.onnx"
+    )
 
 # ── Model (lazy, o singură dată) ─────────────────────────────────────────────
 

@@ -37,3 +37,21 @@ typing_extensions==4.15.0
 uritemplate==4.2.0
 urllib3==2.7.0
 websockets==16.0
+
+# --- Dependențe lipsă (importate în cod, dar absente înainte) ---
+# Versiunile nu sunt fixate; după testare rulează `pip freeze` ca să le pinezi.
+google-auth-oauthlib
+numpy
+scipy
+sounddevice
+pyautogui
+psutil
+fastapi
+uvicorn
+chromadb
+openwakeword
+faster-whisper
+torch
+groq
+Pillow
+pywebview

@@ -47,6 +47,13 @@ _gemini_clienti = [genai.Client(api_key=k) for k in _gemini_chei]
 _gemini_rotatie = itertools.cycle(_gemini_clienti)
 
 GEMINI_MODEL   = "gemini-3.6-flash"
+
+HOST = os.getenv("JARVIS_HOST", "127.0.0.1")   # 0.0.0.0 doar explicit, via env
+PORT = int(os.getenv("JARVIS_PORT", "8080"))
+_ORIGINI_PERMISE = {
+    f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}",
+    *[o.strip() for o in os.getenv("JARVIS_ALLOWED_ORIGINS", "").split(",") if o.strip()],
+}
 ERORI_FALLBACK = (503, 429, 500, 403)
 
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
@@ -161,6 +168,12 @@ async def api_history():
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # Blochează cross-site WebSocket hijacking: acceptă doar origini locale
+    # (sau cele listate în JARVIS_ALLOWED_ORIGINS, separate prin virgulă).
+    origin = ws.headers.get("origin", "")
+    if origin and origin not in _ORIGINI_PERMISE:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     conexiuni_active.append(ws)
     print(f"[WS] Client conectat. Total: {len(conexiuni_active)}")
@@ -224,8 +237,8 @@ async def websocket_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     rag.sincronizeaza_din_db()
-    print(f"\n[Jarvis UI Web]     http://localhost:8080")
-    print(f"[Jarvis UI Desktop] http://localhost:8080/desktop")
+    print(f"\n[Jarvis UI Web]     http://localhost:{PORT}  (bind {HOST})")
+    print(f"[Jarvis UI Desktop] http://localhost:{PORT}/desktop")
     print(f"[Memorie] {db.statistici()['amintiri']} amintiri | "
           f"System prompt: {len(SYSTEM_PROMPT)} caractere\n")
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

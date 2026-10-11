@@ -327,7 +327,7 @@ if __name__ == "__main__":
 
     # Profil
     db.seteaza_profil("nume", "Vasea")
-    db.seteaza_profil("director_proiect", "/home/vaseoc/Downloads/jarvis-assistant-main")
+    db.seteaza_profil("director_proiect", str(Path(__file__).resolve().parents[2]))
     db.seteaza_profil("tema_editor", "dark")
     print(f"\nProfil: {db.get_tot_profilul()}")
 

@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Secrete Google OAuth - NU se comit
+credentials.json
+token.json
+*.onnx
+*.wav

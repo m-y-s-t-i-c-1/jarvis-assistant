@@ -267,7 +267,7 @@ def _reda_cu_sounddevice(cale_wav: str) -> None:
     try:
         info = sd.query_devices(device)
         rata = int(info["default_samplerate"])
-    except Exception:
+        except Exception:
         device = DEVICE_IMPLICIT
         rata = sample_rate
 
@@ -298,6 +298,10 @@ def _reda_cu_sounddevice(cale_wav: str) -> None:
 def _reda_fisier_wav(cale_wav: str) -> None:
     """Redă un fișier WAV: player extern întâi, sounddevice ca plasă de siguranță."""
     if _reda_cu_player_extern(cale_wav):
+        return
+    # ALLOW_SOUNDDEVICE_TTS=0 dezactivează fallback-ul PortAudio (implicit: activ).
+    if os.environ.get("ALLOW_SOUNDDEVICE_TTS", "1").strip().lower() in ("0", "false", "no", "off"):
+        print("[TTS] Niciun player extern disponibil; fallback sounddevice dezactivat.")
         return
     print(
         "[TTS] Niciun player extern disponibil/utilizabil "
@@ -515,4 +519,3 @@ if __name__ == "__main__":
         print("[Redare completă]")
     except RuntimeError as e:
         print(f"[EROARE]: {e}")
-        sys.exit(1)
