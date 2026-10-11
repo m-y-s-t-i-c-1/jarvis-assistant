@@ -19,6 +19,8 @@ observi routări greșite frecvente, extinde listele de mai jos sau spune-mi
 să trecem la clasificare printr-un apel LLM rapid.
 """
 
+import re
+
 # Cuvinte care indică nevoie de o unealtă reală (control sistem, ecran,
 # git, calendar, hardware, vreme, căutare) — dacă apar, mergem direct pe
 # Gemini, care e singurul cu tool-calling funcțional în acest proiect.
@@ -59,21 +61,33 @@ CUVINTE_COD = (
 )
 
 
+def _contine_expresie(text_lower: str, expresii: tuple) -> bool:
+    """
+    FIX: înainte se folosea `cuvant in text_lower` (substring), deci "ram"
+    se potrivea în "program", "git" în "legitim", "api" în "capital",
+    "cod" în "decodare", "mute" în "minute", "job" în "jobenii" etc. —
+    cereri banale erau trimise greșit pe Gemini/NVIDIA. Acum cerem
+    limite de cuvânt la început și la sfârșitul expresiei.
+    """
+    return any(
+        re.search(rf"(?<!\w){re.escape(e)}(?!\w)", text_lower) for e in expresii
+    )
+
+
 def clasifica(text: str) -> str:
     """
     Clasifică o cerere text în "unelte", "cod" sau "conversatie".
 
     Prioritate: "unelte" > "cod" > "conversatie" — dacă mesajul pare
     să aibă nevoie de o acțiune reală, asta câștigă indiferent de alte
-    cuvinte prezente (ex: "scrie codul care deschide browserul" ar trebui
-    tot pe Gemini, pentru că implică o acțiune reală).
+    cuvinte prezente.
     """
-    text_lower = text.lower()
+    text_lower = (text or "").lower()
 
-    if any(cuvant in text_lower for cuvant in CUVINTE_UNELTE):
+    if _contine_expresie(text_lower, CUVINTE_UNELTE):
         return "unelte"
 
-    if any(cuvant in text_lower for cuvant in CUVINTE_COD):
+    if _contine_expresie(text_lower, CUVINTE_COD):
         return "cod"
 
     return "conversatie"
@@ -98,15 +112,15 @@ def este_raspuns_scurt_de_continuare(text: str) -> bool:
     True dacă mesajul e scurt (≤4 cuvinte) și pare o continuare/confirmare
     a schimbului anterior, nu o cerere nouă și independentă.
 
-    Folosit de main.py ca să decidă dacă păstrează categoria din tura
-    precedentă ("routare sticky"), în loc să reclasifice de la zero —
-    esențial pentru fluxuri de confirmare (ex: "fă un commit" -> Jarvis
-    întreabă ceva -> "da" trebuie să ajungă tot la Gemini, nu la NVIDIA).
+    FIX: înainte se verifica `cuvant in text_curat` (substring), deci
+    "ce dată e azi" (conține "da"), "minut" ("nu"), "book" ("ok") erau
+    tratate drept confirmări și moșteneau categoria turei precedente.
+    Acum se compară cuvinte întregi.
     """
-    text_curat = text.strip().lower().rstrip("!?.,")
-    cuvinte = text_curat.split()
+    text_curat = (text or "").strip().lower().rstrip("!?.,")
+    cuvinte = [c.strip("!?.,;:") for c in text_curat.split()]
 
-    if len(cuvinte) > 4:
+    if not cuvinte or len(cuvinte) > 4:
         return False
 
-    return any(cuvant in text_curat for cuvant in _RASPUNSURI_SCURTE)
+    return any(c in _RASPUNSURI_SCURTE for c in cuvinte)
