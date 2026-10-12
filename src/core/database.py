@@ -24,6 +24,7 @@ Utilizare:
 
 import os
 import sqlite3
+from contextlib import contextmanager
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -113,13 +114,29 @@ class JarvisDB:
 
         print(f"[DB] Baza de date inițializată: {self.cale}")
 
-    def _conexiune(self) -> sqlite3.Connection:
-        """Returnează o conexiune cu row_factory pentru acces prin nume de coloană."""
-        con = sqlite3.connect(self.cale)
+    @contextmanager
+    def _conexiune(self):
+        """
+        Context manager: deschide o conexiune, face commit la succes /
+        rollback la eroare și O ÎNCHIDE mereu.
+
+        FIX: `with sqlite3.connect(...) as con` face doar commit/rollback,
+        NU închide conexiunea. Fiecare apel DB lăsa o conexiune deschisă
+        până la garbage collection (scurgere de file descriptors, fișiere
+        -wal/-shm blocate, "database is locked" sub concurență).
+        """
+        con = sqlite3.connect(self.cale, timeout=10)
         con.row_factory = sqlite3.Row
-        con.execute("PRAGMA journal_mode=WAL")   # mai rapid la scrieri concurente
-        con.execute("PRAGMA foreign_keys=ON")
-        return con
+        try:
+            con.execute("PRAGMA journal_mode=WAL")   # mai rapid la scrieri concurente
+            con.execute("PRAGMA foreign_keys=ON")
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     # ── Sesiuni ───────────────────────────────────────────────────────────────
 
@@ -138,12 +155,23 @@ class JarvisDB:
         return sesiune_id
 
     def inchide_sesiune(self, sesiune_id: str, rezumat: str = ""):
-        """Marchează sesiunea ca închisă și salvează rezumatul opțional."""
+        """
+        Marchează sesiunea ca închisă și salvează rezumatul opțional.
+
+        FIX: înainte, închiderea normală (rezumat="") ȘTERGEA rezumatul
+        salvat în timpul sesiunii de context_manager. Acum un rezumat gol
+        nu suprascrie unul existent.
+        """
         with self._conexiune() as con:
             con.execute(
-                "UPDATE sesiuni SET inchis_la=?, rezumat=? WHERE id=?",
+                "UPDATE sesiuni SET inchis_la=?, rezumat=COALESCE(NULLIF(?, ''), rezumat) WHERE id=?",
                 (datetime.now().isoformat(), rezumat, sesiune_id)
             )
+
+    def salveaza_rezumat_sesiune(self, sesiune_id: str, rezumat: str):
+        """Salvează rezumatul unei sesiuni FĂRĂ a o marca drept închisă."""
+        with self._conexiune() as con:
+            con.execute("UPDATE sesiuni SET rezumat=? WHERE id=?", (rezumat, sesiune_id))
 
     def listeaza_sesiuni(self, limita: int = 10) -> list[dict]:
         """Returnează ultimele N sesiuni."""

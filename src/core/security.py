@@ -37,31 +37,31 @@ CONFIRMATION_MODE = ConfirmationMode.TEXT
 # pattern-uri, execuția e oprită imediat, fără confirmare, fără excepții.
 # Sunt regex-uri, ca să prindem variante (rm -rf, rm -Rf, rm -r -f etc.)
 BLACKLIST_PATTERNS = [
-    r"rm\s+-[rRfF]+",          # rm -rf și variante
-    r"rm\s+--recursive",       # rm --recursive
-    r":\s*\(\s*\)\s*\{.*\}",   # fork bomb
-    r"mkfs\.",                 # formatare disc
-    r"dd\s+if=",               # dd (suprascrierea discului)
-    r">\s*/dev/(sd|nvme|vd)",  # scriere directă pe disc
-    r"chmod\s+-R\s+777",       # permisiuni globale nesigure
-    r"chown\s+-R.*root",       # schimbare owner la root recursiv
-    r"sudo\s+rm",              # rm cu sudo
-    r"shutdown",                # oprire sistem
-    r"reboot",                 # restart sistem
-    r"halt",                   # oprire hard
-    r"poweroff",               # oprire sistem
-    r"passwd",                 # schimbare parole
-    r"useradd|userdel|usermod",# modificare utilizatori sistem
-    r"visudo|sudoers",         # modificare privilegii sudo
-    r"crontab\s+-[re]",        # modificare cron jobs
-    r"iptables|nftables",      # modificare firewall
-    r"curl.+\|\s*(bash|sh)",   # pipe curl direct în shell
-    r"wget.+\|\s*(bash|sh)",   # pipe wget direct în shell
-    r"eval\s+",                # eval arbitrar
-    r"exec\s+",                # exec arbitrar
-    r"base64\s+--decode.*\|",  # decode base64 și pipe (ofuscare)
-    r"python.*-c\s+['\"]",     # python -c "cod arbitrar"
-    r"os\.system|subprocess",  # injecție de cod Python
+    # FIX: pattern-urile nu aveau limite de cuvânt, deci "halt" bloca
+    # "asphalt", "rm -f" bloca "confirm -f"/"perform -rf", "exec " bloca
+    # "execute"-uri etc. Acum (?<![\w-]) / \b ancorează la cuvânt întreg.
+    r"(?<![\w-])rm\s+-[rRfF]+",     # rm -rf și variante
+    r"(?<![\w-])rm\s+--recursive",  # rm --recursive
+    r":\s*\(\s*\)\s*\{.*\}",         # fork bomb
+    r"\bmkfs\.",                    # formatare disc
+    r"\bdd\s+if=",                  # dd (suprascrierea discului)
+    r">\s*/dev/(sd|nvme|vd)",       # scriere directă pe disc
+    r"\bchmod\s+-R\s+777",          # permisiuni globale nesigure
+    r"\bchown\s+-R.*root",          # schimbare owner la root recursiv
+    r"\bsudo\s+rm\b",              # rm cu sudo
+    r"\b(shutdown|reboot|halt|poweroff)\b",  # oprire/restart sistem
+    r"\bpasswd\b",                  # schimbare parole
+    r"\b(useradd|userdel|usermod)\b",  # modificare utilizatori sistem
+    r"\b(visudo|sudoers)\b",        # modificare privilegii sudo
+    r"\bcrontab\s+-[re]",           # modificare cron jobs
+    r"\b(iptables|nftables)\b",     # modificare firewall
+    r"\bcurl\b.+\|\s*(bash|sh)\b",  # pipe curl direct în shell
+    r"\bwget\b.+\|\s*(bash|sh)\b",  # pipe wget direct în shell
+    r"\beval\s+",                   # eval arbitrar
+    r"\bexec\s+",                   # exec arbitrar
+    r"\bbase64\s+(--decode|-d).*\|",  # decode base64 și pipe (ofuscare)
+    r"\bpython[\d.]*\s.*-c\s+['\"]", # python -c "cod arbitrar"
+    r"\bos\.system\b|\bsubprocess\b",  # injecție de cod Python
 ]
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel

@@ -89,6 +89,25 @@ def _genereaza_rezumat(client, model: str, mesaje: list) -> str:
         return f"[Rezumat indisponibil — {len(mesaje)} mesaje arhivate]"
 
 
+def _taie_la_granita_valida(mesaje: list) -> list:
+    """
+    FIX: tăierea la o poziție fixă poate lăsa la început un function_response
+    orfan (apelul lui a fost rezumat) sau un function_call fără răspuns —
+    Gemini respinge asta cu 400. Eliminăm din față tot ce nu e un mesaj de
+    text curat (user/model, fără function_call / function_response).
+    """
+    def _curat(m) -> bool:
+        parts = getattr(m, "parts", None) or []
+        if any(getattr(p, "function_call", None) or getattr(p, "function_response", None) for p in parts):
+            return False
+        return any(getattr(p, "text", None) for p in parts)
+
+    i = 0
+    while i < len(mesaje) - 1 and not _curat(mesaje[i]):
+        i += 1
+    return mesaje[i:]
+
+
 def proceseaza(
     istoric: list,
     sesiune_id: str,
@@ -115,7 +134,7 @@ def proceseaza(
     print(f"[Context] Fereastra depășită ({len(istoric)} mesaje) — rezum primele {BLOC_REZUMARE}...")
 
     mesaje_vechi = istoric[:BLOC_REZUMARE]
-    istoric_nou   = istoric[BLOC_REZUMARE:]
+    istoric_nou   = _taie_la_granita_valida(istoric[BLOC_REZUMARE:])
 
     if client:
         text_rezumat = _genereaza_rezumat(client, model, mesaje_vechi)
@@ -124,14 +143,17 @@ def proceseaza(
         text_rezumat = f"[Context arhivat: {len(mesaje_vechi)} mesaje anterioare omise pentru eficiență]"
 
     if text_rezumat:
-        # Salvăm rezumatul în DB
-        db.salveaza_memorie(
-            tip="context",
-            continut=text_rezumat,
-            sursa=sesiune_id,
-            relevanta=0.8,
-        )
-        db.inchide_sesiune(sesiune_id, rezumat=text_rezumat)
+        # FIX: placeholder-ele ("[Rezumat indisponibil...]", "[Context
+        # arhivat...]") ajungeau în memoria permanentă ca "amintiri" false,
+        # iar inchide_sesiune() marca sesiunea ca închisă în plină conversație.
+        if not text_rezumat.startswith("["):
+            db.salveaza_memorie(
+                tip="context",
+                continut=text_rezumat,
+                sursa=sesiune_id,
+                relevanta=0.8,
+            )
+            db.salveaza_rezumat_sesiune(sesiune_id, text_rezumat)
 
         # Inserăm rezumatul ca primul mesaj în istoricul nou
         mesaj_rezumat = types.Content(

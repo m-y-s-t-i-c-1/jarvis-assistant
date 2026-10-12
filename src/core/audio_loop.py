@@ -202,7 +202,13 @@ def porneste_bucla_audio(
 
         # Verificăm comenzile de oprire (eliminăm punctuația, comparăm lowercase)
         text_curat = text_utilizator.strip().lower().rstrip("!?.,")
-        if text_curat in COMENZI_OPRIRE or any(cmd in text_curat.split() for cmd in COMENZI_OPRIRE):
+        # FIX: înainte, ORICE propoziție conținând cuvântul "stop"/"exit"
+        # ("pune stop la melodie", "ce înseamnă exit code") închidea modul
+        # vocal. Acum doar enunțurile foarte scurte sunt comenzi de oprire.
+        cuvinte_curate = [c.strip("!?.,;:") for c in text_curat.split()]
+        if text_curat in COMENZI_OPRIRE or (
+            len(cuvinte_curate) <= 3 and any(c in COMENZI_OPRIRE for c in cuvinte_curate)
+        ):
             raspuns_oprire = "La revedere, Vasea. Modul vocal dezactivat."
             print(f"Jarvis: {raspuns_oprire}")
             try:
@@ -213,6 +219,7 @@ def porneste_bucla_audio(
 
         # ── Pasul 3+4: Router → Agent (Gemini sau NVIDIA) + TTS pe măsură ──
         print(INDICATOR["gandesc"])
+        lungime_inainte = len(istoric)
         istoric.append(
             types.Content(
                 role="user",
@@ -301,7 +308,13 @@ def porneste_bucla_audio(
                 e = eroare_de_afisat
                 raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
                 print(f"[EROARE agent]: {e}")
-                traceback.print_exc()
+                # FIX: print_exc() în afara blocului except afișa doar
+                # "NoneType: None" — excepția era deja ieșită din scope.
+                traceback.print_exception(type(e), e, e.__traceback__)
+                # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
+                # ca să nu rămână "user" consecutiv în istoric.
+                if len(istoric) > 0 and getattr(istoric[-1], "role", None) == "user":
+                    del istoric[lungime_inainte:]
                 try:
                     spune(raspuns_text)
                 except Exception as e_tts:

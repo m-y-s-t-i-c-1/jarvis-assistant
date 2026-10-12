@@ -13,11 +13,13 @@ necesita_confirmare=True și trec prin mecanismul din Task 2.3.
 import subprocess
 import os
 import signal
+import sys
 from src.core.registry import unealta
 
 # ---- PID-ul serverului HTTP activ (dacă e pornit) ----
 # Îl ținem în memorie ca să-l putem opri la cerere.
 _server_pid: int | None = None
+_server_proc: "subprocess.Popen | None" = None  # păstrat ca să putem face poll()/wait() (evită procese zombie)
 
 
 # ==============================================================
@@ -91,7 +93,13 @@ def deschide_vscode(cale: str = "."):
 )
 def porneste_server_http(port: int = 8000, folder: str = "."):
     """Pornește python -m http.server în fundal."""
-    global _server_pid
+    global _server_pid, _server_proc
+
+    # FIX: dacă serverul a murit extern, _server_pid rămânea setat pe vecie
+    # și "deja activ" bloca orice pornire nouă.
+    if _server_proc is not None and _server_proc.poll() is not None:
+        _server_pid = None
+        _server_proc = None
 
     if _server_pid is not None:
         return (
@@ -99,16 +107,35 @@ def porneste_server_http(port: int = 8000, folder: str = "."):
             f"Oprește-l mai întâi cu 'opreste_server_http' înainte să pornești altul."
         )
 
+    # FIX: Gemini trimite numerele JSON ca float (8000.0) -> "8000.0" nu e
+    # port valid, serverul murea imediat, dar se raporta "pornit".
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return f"Port invalid: {port!r}."
+    if not 1 <= port <= 65535:
+        return f"Port invalid: {port} (trebuie între 1 și 65535)."
+
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         return f"Folderul '{folder}' nu există."
 
     try:
+        # FIX: "python" nu există pe multe sisteme (doar "python3");
+        # sys.executable e interpretorul care rulează deja Jarvis.
         proces = subprocess.Popen(
-            ["python", "-m", "http.server", str(port), "--directory", folder],
+            [sys.executable, "-m", "http.server", str(port), "--directory", folder],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Dacă portul e ocupat, procesul moare în ~0.3s — nu raportăm succes fals.
+        try:
+            proces.wait(timeout=0.7)
+            return (f"Serverul nu a putut porni pe portul {port} "
+                    f"(cod ieșire {proces.returncode}) — probabil e ocupat.")
+        except subprocess.TimeoutExpired:
+            pass
+        _server_proc = proces
         _server_pid = proces.pid
         return (
             f"Server HTTP pornit pe http://localhost:{port} "
@@ -127,18 +154,27 @@ def porneste_server_http(port: int = 8000, folder: str = "."):
 )
 def opreste_server_http():
     """Oprește serverul HTTP local pornit de Jarvis."""
-    global _server_pid
+    global _server_pid, _server_proc
 
     if _server_pid is None:
         return "Nu există niciun server HTTP activ pornit de Jarvis."
 
     try:
-        os.kill(_server_pid, signal.SIGTERM)
         pid_oprit = _server_pid
+        if _server_proc is not None and _server_proc.poll() is None:
+            _server_proc.terminate()
+            try:
+                _server_proc.wait(timeout=3)   # recoltăm procesul, fără zombie
+            except subprocess.TimeoutExpired:
+                _server_proc.kill()
+        elif _server_proc is None:
+            os.kill(_server_pid, signal.SIGTERM)
         _server_pid = None
+        _server_proc = None
         return f"Server HTTP (PID {pid_oprit}) oprit."
     except ProcessLookupError:
         _server_pid = None
+        _server_proc = None
         return "Serverul nu mai era activ (probabil s-a închis singur)."
     except Exception as e:
         return f"Eroare la oprirea serverului: {str(e)}"
@@ -149,16 +185,18 @@ def opreste_server_http():
 )
 def status_server_http():
     """Verifică dacă serverul HTTP local e activ."""
+    global _server_pid, _server_proc
     if _server_pid is None:
         return "Niciun server HTTP activ."
 
-    # Verificăm dacă procesul mai există efectiv
-    try:
-        os.kill(_server_pid, 0)  # signal 0 = verificare existență, fără efect
-        return f"Server HTTP activ pe PID {_server_pid}."
-    except ProcessLookupError:
-        _server_pid_local = _server_pid
-        return f"Serverul (PID {_server_pid_local}) nu mai rulează (s-a închis extern)."
+    # FIX: os.kill(pid, 0) raportează "activ" și pentru procese zombie, iar
+    # starea nu se reseta când serverul murea. Folosim poll() pe Popen.
+    if _server_proc is not None and _server_proc.poll() is not None:
+        pid_mort = _server_pid
+        _server_pid = None
+        _server_proc = None
+        return f"Serverul (PID {pid_mort}) nu mai rulează (s-a închis extern)."
+    return f"Server HTTP activ pe PID {_server_pid}."
 
 
 # ==============================================================
