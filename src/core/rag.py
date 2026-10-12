@@ -22,7 +22,7 @@ Utilizare:
     rezultate = rag.cauta("proiect Python", n=3)
 """
 
-import os
+import re
 from pathlib import Path
 from datetime import datetime
 
@@ -47,27 +47,38 @@ class RAGManager:
     """
 
     def __init__(self):
-        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        # FIX: `rag = RAGManager()` rulează la import. Dacă modelul de
+        # embedding nu se poate descărca (prima rulare offline) sau
+        # sentence-transformers/chromadb lipsește, TOATĂ aplicația (main.py,
+        # server.py) pica la pornire. Acum RAG-ul se dezactivează elegant:
+        # restul lui Jarvis merge, doar fără căutare semantică.
+        self._activ = False
+        try:
+            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Client persistent — datele supraviețuiesc între sesiuni
-        self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            # Client persistent — datele supraviețuiesc între sesiuni
+            self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
 
-        # Funcția de embedding — all-MiniLM-L6-v2, descărcată automat prima dată
-        self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=EMBEDDING_MODEL
-        )
+            # Funcția de embedding — all-MiniLM-L6-v2, descărcată automat prima dată
+            self._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=EMBEDDING_MODEL
+            )
 
-        # Colecțiile
-        self._col_conversatii = self._client.get_or_create_collection(
-            name="conversatii",
-            embedding_function=self._embedding_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self._col_amintiri = self._client.get_or_create_collection(
-            name="amintiri",
-            embedding_function=self._embedding_fn,
-            metadata={"hnsw:space": "cosine"},
-        )
+            # Colecțiile
+            self._col_conversatii = self._client.get_or_create_collection(
+                name="conversatii",
+                embedding_function=self._embedding_fn,
+                metadata={"hnsw:space": "cosine"},
+            )
+            self._col_amintiri = self._client.get_or_create_collection(
+                name="amintiri",
+                embedding_function=self._embedding_fn,
+                metadata={"hnsw:space": "cosine"},
+            )
+            self._activ = True
+        except Exception as e:
+            print(f"[RAG] DEZACTIVAT — inițializare eșuată: {type(e).__name__}: {e}")
+            return
 
         print(f"[RAG] ChromaDB inițializat: {CHROMA_DIR}")
         print(f"[RAG] Conversații indexate: {self._col_conversatii.count()}")
@@ -87,7 +98,7 @@ class RAGManager:
         Returnează:
             ID-ul documentului indexat
         """
-        if not continut or len(continut.strip()) < 10:
+        if not self._activ or not continut or len(continut.strip()) < 10:
             return ""
 
         doc_id = f"{sesiune_id}_{rol}_{datetime.now().timestamp()}"
@@ -123,7 +134,7 @@ class RAGManager:
             sursa:       sesiune_id de origine
             amintire_id: ID-ul din tabelul SQLite (pentru deduplicare)
         """
-        if not continut or len(continut.strip()) < 5:
+        if not self._activ or not continut or len(continut.strip()) < 5:
             return ""
 
         doc_id = f"mem_{amintire_id}_{tip}"
@@ -139,6 +150,7 @@ class RAGManager:
                 metadatas=[{
                     "tip": tip,
                     "sursa": sursa,
+                    "amintire_id": int(amintire_id),
                     "timestamp": datetime.now().isoformat(),
                 }],
                 ids=[doc_id],
@@ -148,17 +160,68 @@ class RAGManager:
             print(f"[RAG] Eroare indexare amintire: {e}")
             return ""
 
+    def _id_uri_amintiri(self) -> list[str]:
+        """Toate ID-urile din colecția de amintiri (fără a încărca documentele)."""
+        try:
+            return list(self._col_amintiri.get(include=[])["ids"])
+        except Exception:
+            return list(self._col_amintiri.get()["ids"])
+
+    def sterge_amintire(self, amintire_id: int) -> int:
+        """
+        FIX: consolidare.py ștergea amintiri doar din SQLite; în ChromaDB
+        rămâneau pentru totdeauna ("amintiri fantomă" returnate de cauta()).
+        Șterge din vectori toate documentele amintirii cu acest ID.
+        """
+        if not self._activ:
+            return 0
+        try:
+            prefix = f"mem_{int(amintire_id)}_"
+            de_sters = [i for i in self._id_uri_amintiri() if i.startswith(prefix)]
+            if de_sters:
+                self._col_amintiri.delete(ids=de_sters)
+            return len(de_sters)
+        except Exception as e:
+            print(f"[RAG] Eroare ștergere amintire {amintire_id}: {e}")
+            return 0
+
     def sincronizeaza_din_db(self):
         """
         Importă toate amintirile existente din SQLite în ChromaDB.
         Util la prima rulare sau după import manual de date.
         """
+        if not self._activ:
+            return 0
+
         from src.core.database import db
 
-        amintiri = db.cauta_memorie(limita=500)
-        indexate = 0
+        # FIX 1: limita era 500 -> amintirile peste #500 (după relevanță)
+        # nu ajungeau niciodată în RAG. Acum le luăm pe toate.
+        amintiri = db.cauta_memorie(limita=1_000_000)
+        ids_db = {a["id"] for a in amintiri}
 
+        # FIX 2: înainte se făcea un `get()` separat PER amintire (N interogări
+        # la fiecare pornire). Acum citim ID-urile existente o singură dată.
+        existente = set(self._id_uri_amintiri())
+
+        # FIX 3: curățăm "amintirile fantomă" — vectori ale căror rânduri
+        # au fost șterse din SQLite (inclusiv cele rămase de la versiunile vechi).
+        orfane = []
+        for doc_id in existente:
+            m = re.match(r"^mem_(\d+)_", doc_id)
+            if m and int(m.group(1)) not in ids_db:
+                orfane.append(doc_id)
+        if orfane:
+            try:
+                self._col_amintiri.delete(ids=orfane)
+                existente -= set(orfane)
+            except Exception as e:
+                print(f"[RAG] Eroare la curățarea orfanilor: {e}")
+
+        indexate = 0
         for a in amintiri:
+            if f"mem_{a['id']}_{a['tip']}" in existente:
+                continue
             doc_id = self.indexeaza_amintire(
                 tip=a["tip"],
                 continut=a["continut"],
@@ -168,7 +231,7 @@ class RAGManager:
             if doc_id:
                 indexate += 1
 
-        print(f"[RAG] Sincronizat {indexate} amintiri din SQLite.")
+        print(f"[RAG] Sincronizat: {indexate} amintiri noi, {len(orfane)} orfane șterse.")
         return indexate
 
     # ── Căutare ───────────────────────────────────────────────────────────────
@@ -185,6 +248,9 @@ class RAGManager:
         Returnează:
             Listă de dicționare cu 'text', 'tip', 'scor', 'metadata'
         """
+        if not self._activ:
+            return []
+
         rezultate = []
 
         # Căutare în amintiri
@@ -255,10 +321,18 @@ class RAGManager:
     # ── Statistici ────────────────────────────────────────────────────────────
 
     def statistici(self) -> dict:
+        if not self._activ:
+            return {
+                "conversatii_indexate": 0,
+                "amintiri_indexate":    0,
+                "cale_chroma":          str(CHROMA_DIR),
+                "activ":                False,
+            }
         return {
             "conversatii_indexate": self._col_conversatii.count(),
             "amintiri_indexate":    self._col_amintiri.count(),
             "cale_chroma":          str(CHROMA_DIR),
+            "activ":                True,
         }
 
 

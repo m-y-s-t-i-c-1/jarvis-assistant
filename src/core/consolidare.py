@@ -38,6 +38,15 @@ FACTOR_DEGRADARE = 0.85
 # Relevanța minimă sub care ștergem amintirea
 PRAG_STERGERE = 0.1
 
+# FIX: promptul de consolidare cunoștea doar 4 tipuri, deci AI-ul "turna"
+# cod_validat / decizie_arhitectura / eroare_rezolvata (cele mai valoroase,
+# vezi memory.py) în "fapt"/"context" sau le ștergea ca "vagi". Acum le știe
+# pe toate și validăm tipul returnat.
+TIPURI_VALIDE = (
+    "fapt", "preferinta", "context", "corectie",
+    "cod_validat", "decizie_arhitectura", "eroare_rezolvata",
+)
+
 PROMPT_CONSOLIDARE = """Analizează aceste amintiri despre utilizatorul Vasea și consolidează-le.
 
 Amintiri de consolidat:
@@ -46,7 +55,7 @@ Amintiri de consolidat:
 Returnează DOAR un JSON valid (fără markdown):
 {{
   "consolidate": [
-    {{"tip": "fapt|preferinta|context|corectie", "continut": "amintire consolidată", "relevanta": 0.9}},
+    {{"tip": "fapt|preferinta|context|corectie|cod_validat|decizie_arhitectura|eroare_rezolvata", "continut": "amintire consolidată", "relevanta": 0.9}},
     ...
   ],
   "de_sters": [id1, id2],
@@ -58,11 +67,27 @@ Reguli:
 - Dacă există contradicții, păstrează cea mai recentă și marchează-o cu relevanta 1.0.
 - Șterge amintirile vagi, incomplete sau redundante (pune id-ul în de_sters).
 - Păstrează toate amintirile unice și valoroase.
+- În "consolidate" pune DOAR amintirile NOI rezultate din combinare — NU repeta amintiri
+  existente rămase neschimbate (acelea rămân automat).
+- Păstrează tipul original al amintirilor (cod_validat, decizie_arhitectura și
+  eroare_rezolvata sunt valoroase: nu le șterge și nu le muta în alt tip).
 - Maximum 15 amintiri consolidate total.
 """
 
 
 class ConsolidareMemorie:
+
+    @staticmethod
+    def _sterge(id_amintire: int) -> None:
+        """
+        FIX: ștergea doar din SQLite; vectorii rămâneau în ChromaDB și
+        cauta() returna "amintiri fantomă". Acum ștergem din ambele.
+        """
+        db.sterge_memorie(id_amintire)
+        try:
+            rag.sterge_amintire(id_amintire)
+        except Exception as e:
+            print(f"[Consolidare] Nu am putut șterge vectorul {id_amintire}: {e}")
 
     def _deduplicare_rapida(self) -> int:
         """
@@ -85,9 +110,7 @@ class ConsolidareMemorie:
 
             for r in rezultate:
                 if r["scor"] >= PRAG_DUPLICAT and r["sursa"] == "amintiri":
-                    # Extragem id-ul din ChromaDB (format: mem_{id}_{tip})
                     try:
-                        parti = r["metadata"].get("tip", "")
                         # Căutăm amintirea în DB după conținut
                         for a2 in amintiri:
                             if (
@@ -98,11 +121,18 @@ class ConsolidareMemorie:
                                 # Păstrăm pe cea cu relevanță mai mare
                                 de_sters = a2 if a1["relevanta"] >= a2["relevanta"] else a1
                                 if de_sters["id"] not in id_uri_sterse:
-                                    db.sterge_memorie(de_sters["id"])
+                                    self._sterge(de_sters["id"])
                                     id_uri_sterse.add(de_sters["id"])
                                     sterse += 1
                     except Exception:
                         pass
+
+                # FIX: dacă a1 a fost ștearsă (era mai puțin relevantă decât
+                # duplicatul ei), NU mai comparăm vecinii ei — altfel puteam
+                # șterge și un a3 "duplicat" doar cu a1, pierzând informație
+                # care nu mai avea nicio copie păstrată.
+                if a1["id"] in id_uri_sterse:
+                    break
 
         return sterse
 
@@ -122,7 +152,7 @@ class ConsolidareMemorie:
                 noua_relevanta = a["relevanta"] * FACTOR_DEGRADARE
 
                 if noua_relevanta < PRAG_STERGERE:
-                    db.sterge_memorie(a["id"])
+                    self._sterge(a["id"])
                     sterse += 1
                 else:
                     # Actualizăm relevanța în DB
@@ -210,30 +240,52 @@ class ConsolidareMemorie:
         if client:
             date_ai = self._consolidare_cu_ai(client, model)
 
-            # Ștergem amintirile marcate de AI
-            for id_sters in date_ai.get("de_sters", []):
-                try:
-                    db.sterge_memorie(int(id_sters))
-                    rezultat["amintiri_sterse_ai"] += 1
-                except Exception:
-                    pass
+            if not isinstance(date_ai, dict):
+                date_ai = {}
 
-            # Salvăm amintirile consolidate noi
-            for a in date_ai.get("consolidate", []):
-                continut = a.get("continut", "").strip()
+            # FIX: salvăm ÎNTÂI amintirile consolidate, apoi ștergem sursele.
+            # (Înainte, o eroare la salvare după ștergere pierdea informația.)
+            # FIX: AI-ul repeta adesea amintiri existente neschimbate în
+            # "consolidate"; codul le salva ca rânduri NOI la fiecare ciclu
+            # (la fiecare 10 mesaje) -> tabela se umfla cu duplicate. Acum
+            # sărim peste orice text deja existent.
+            existente_txt = {
+                a["continut"].strip().lower() for a in db.cauta_memorie(limita=1_000_000)
+            }
+            for a in date_ai.get("consolidate") or []:
+                if not isinstance(a, dict):
+                    continue
+                continut = str(a.get("continut", "")).strip()
                 tip = a.get("tip", "fapt")
-                relevanta = float(a.get("relevanta", 0.9))
+                if tip not in TIPURI_VALIDE:
+                    tip = "fapt"
+                try:
+                    relevanta = max(0.0, min(1.0, float(a.get("relevanta", 0.9))))
+                except (TypeError, ValueError):
+                    relevanta = 0.9
 
-                if continut and len(continut) > 10:
+                if continut and len(continut) > 10 and continut.lower() not in existente_txt:
                     db.salveaza_memorie(
                         tip=tip,
                         continut=continut,
                         sursa="consolidare_autonoma",
                         relevanta=relevanta,
                     )
+                    existente_txt.add(continut.lower())
                     rezultat["amintiri_consolidate"] += 1
 
-            rezultat["observatii"] = date_ai.get("observatii", "")
+            # Ștergem amintirile marcate de AI
+            de_sters = date_ai.get("de_sters") or []
+            if not isinstance(de_sters, list):
+                de_sters = []
+            for id_sters in de_sters:
+                try:
+                    self._sterge(int(id_sters))
+                    rezultat["amintiri_sterse_ai"] += 1
+                except Exception:
+                    pass
+
+            rezultat["observatii"] = str(date_ai.get("observatii", ""))
             print(f"[Consolidare] AI: {rezultat['amintiri_consolidate']} consolidate, "
                   f"{rezultat['amintiri_sterse_ai']} șterse.")
             if rezultat["observatii"]:
