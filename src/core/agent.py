@@ -19,7 +19,9 @@ MAX_PASI = 5  # plasă de siguranță, ca să nu rămânem blocați într-o bucl
 # chiar și pe răspunsuri corecte (ex: descrieri de ecran care menționau
 # incidental "deschise").
 SEMNALE_POSIBILA_HALUCINATIE = (
-    "ora", "ore", "data", "dată", "ziua", "luna",
+    "ora exactă", "ora exacta", "este ora", "e ora", "sunt orele",
+    "data de azi", "data de astăzi", "data de astazi", "astăzi este", "astazi este",
+    "azi este", "suntem în", "suntem in",
     "am pornit", "am lansat", "am deschis", "am rulat",
 )
 _PATTERN_HALUCINATIE = re.compile(
@@ -272,6 +274,38 @@ def agent_loop(
 _PATTERN_SFARSIT_PROPOZITIE = re.compile(r'[.!?]+[”"\')\]]?(?:\s+|$)')
 
 
+def _uneste_parti_stream(parti: list):
+    """
+    FIX: în streaming, fiecare chunk conține doar o BUCATĂ din răspuns.
+    Înainte se păstra doar conținutul ultimului chunk (`continut_final =
+    continut`), deci în istoric ajungea doar ultima bucată de text, iar un
+    function_call venit într-un chunk anterior se pierdea — apoi
+    function_response-ul fără apel în față făcea Gemini să dea 400.
+    Aici adunăm părțile din toate chunk-urile într-un singur Content,
+    lipind textul simplu adiacent.
+    """
+    if not parti:
+        return None
+    unite = []
+    for parte in parti:
+        text_simplu = (
+            getattr(parte, "text", None)
+            and not getattr(parte, "function_call", None)
+            and not getattr(parte, "thought", None)
+        )
+        if (
+            text_simplu
+            and unite
+            and getattr(unite[-1], "text", None)
+            and not getattr(unite[-1], "function_call", None)
+            and not getattr(unite[-1], "thought", None)
+        ):
+            unite[-1] = types.Part(text=unite[-1].text + parte.text)
+        else:
+            unite.append(parte)
+    return types.Content(role="model", parts=unite)
+
+
 def agent_loop_streaming(
     client,
     model: str,
@@ -333,7 +367,7 @@ def agent_loop_streaming(
         buffer_text = ""
         text_complet = ""
         apeluri_functii = []
-        continut_final = None
+        parti_acumulate = []
         intrerupt = False
 
         _start_gemini = time.perf_counter()
@@ -355,7 +389,7 @@ def agent_loop_streaming(
             if continut is None or not continut.parts:
                 continue
 
-            continut_final = continut
+            parti_acumulate.extend(continut.parts)
 
             for parte in continut.parts:
                 if parte.function_call:
@@ -385,6 +419,7 @@ def agent_loop_streaming(
                 break
 
         print(f"[TIMP] Gemini — generare completă (acest pas): {time.perf_counter() - _start_gemini:.2f}s")
+        continut_final = _uneste_parti_stream(parti_acumulate)
 
         if intrerupt:
             # Am fost întrerupți — nu mai rostim restul din buffer, nu mai

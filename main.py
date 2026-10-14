@@ -43,16 +43,34 @@ if not _gemini_chei:
     raise ValueError("Nu am găsit nicio GEMINI_API_KEY în .env.")
 
 _gemini_clienti = [genai.Client(api_key=k) for k in _gemini_chei]
-_gemini_rotatie = itertools.cycle(_gemini_clienti)
-# next() pe itertools.cycle nu e garantat thread-safe între thread-uri
-# multiple (text + wake word + memorie + consolidare) — îl protejăm.
-_lock_rotatie = threading.Lock()
+
+
+class _RotatieSigura:
+    """
+    Iterator ciclic thread-safe peste clienții Gemini. Obiectul acesta e
+    pasat și modulelor vocale (wake_word / audio_loop), care îl apelează
+    cu next() din alte thread-uri — itertools.cycle nu e garantat sigur
+    la acces concurent.
+    """
+
+    def __init__(self, elemente):
+        self._ciclu = itertools.cycle(elemente)
+        self._lock = threading.Lock()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self._lock:
+            return next(self._ciclu)
+
+
+_gemini_rotatie = _RotatieSigura(_gemini_clienti)
 
 
 def urmatorul_client():
     """Returnează următorul client Gemini din rotație, thread-safe."""
-    with _lock_rotatie:
-        return next(_gemini_rotatie)
+    return next(_gemini_rotatie)
 
 
 groq_key    = os.getenv("GROQ_API_KEY")

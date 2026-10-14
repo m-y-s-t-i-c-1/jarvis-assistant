@@ -45,6 +45,17 @@ CUVINTE_UNELTE = (
     "vremea", "vreme e", "prognoza", "caută pe internet", "cauta pe internet",
     # timp
     "ce oră", "ce ora", "ce dată", "ce data", "cât e ceasul", "cat e ceasul",
+    # FIX: formulările foarte comune "cât e ora", "ce zi e azi", "în ce lună
+    # suntem", "data de azi" nu erau în listă -> mergeau pe NVIDIA (fără
+    # unelte), care nu poate afla ora/data reală. get_ora_curenta acoperă
+    # oră, dată, zi a săptămânii și lună, deci toate trebuie rutate pe Gemini.
+    "cât e ora", "cat e ora", "cât este ora", "cat este ora",
+    "cât e ceasul", "cât este ceasul", "cat este ceasul",
+    "ora exactă", "ora exacta", "ora curentă", "ora curenta",
+    "ce zi", "în ce zi", "in ce zi", "ziua de azi", "ziua curentă", "ziua curenta",
+    "ce lună", "ce luna", "în ce lună", "in ce luna", "în ce luna",
+    "data de azi", "data de astăzi", "data de astazi", "data curentă", "data curenta",
+    "care e data", "care este data",
     # joburi fundal
     "job", "rulează în fundal", "ruleaza in fundal",
 )
