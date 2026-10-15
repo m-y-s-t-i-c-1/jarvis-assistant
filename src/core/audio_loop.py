@@ -110,7 +110,7 @@ asistentul principal, cu unelte."""
 _ultima_categorie_vocal: str = "unelte"
 
 
-def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata) -> None:
+def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata, flag_intrerupere=None) -> None:
     """
     Împarte un text complet (primit dintr-o singură bucată, de la NVIDIA —
     care nu suportă streaming propoziție-cu-propoziție ca Gemini) în
@@ -122,12 +122,18 @@ def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata) -> None:
     """
     pozitie = 0
     for potrivire in _PATTERN_SFARSIT_PROPOZITIE.finditer(text):
+        # FIX: barge-in oprea doar propoziția curentă; restul răspunsului
+        # NVIDIA continua să fie rostit.
+        if flag_intrerupere is not None and flag_intrerupere.is_set():
+            return
         capat = potrivire.end()
         propozitie = text[pozitie:capat].strip()
         if propozitie:
             la_propozitie_gata(propozitie)
         pozitie = capat
 
+    if flag_intrerupere is not None and flag_intrerupere.is_set():
+        return
     rest = text[pozitie:].strip()
     if rest:
         la_propozitie_gata(rest)
@@ -289,7 +295,7 @@ def porneste_bucla_audio(
                     istoric.append(
                         types.Content(role="model", parts=[types.Part(text=rezultat)])
                     )
-                    _vorbeste_text_pe_propozitii(rezultat, _la_propozitie)
+                    _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
                 else:
                     # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
                     print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
@@ -313,8 +319,10 @@ def porneste_bucla_audio(
                 traceback.print_exception(type(e), e, e.__traceback__)
                 # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
                 # ca să nu rămână "user" consecutiv în istoric.
-                if len(istoric) > 0 and getattr(istoric[-1], "role", None) == "user":
-                    del istoric[lungime_inainte:]
+                # FIX: ștergem necondiționat — dacă ultimul element era un
+                # turn "model" cu function_call fără răspuns, vechea condiție
+                # (role == "user") lăsa istoricul corupt pentru totdeauna.
+                del istoric[lungime_inainte:]
                 try:
                     spune(raspuns_text)
                 except Exception as e_tts:

@@ -14,6 +14,8 @@ import json
 import asyncio
 import time
 import itertools
+import re
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -56,6 +58,10 @@ _ORIGINI_PERMISE = {
 }
 ERORI_FALLBACK = (503, 429, 500, 403)
 
+# FIX: `istoric` e global și e modificat din thread-uri de executor —
+# două mesaje simultane se intercalau și corupeau istoricul.
+_LOCK_AGENT = threading.Lock()
+
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
 - Te adresezi întotdeauna utilizatorului cu "Vasea".
 - Tonul tău este calm, profesionist, dar cu un strop de umor sec, britanic.
@@ -91,7 +97,22 @@ async def broadcast(mesaj: dict):
             conexiuni_active.remove(ws)
 
 
+def _e_eroare_de_fallback(mesaj_err: str) -> bool:
+    # FIX: înainte `str(c) in mesaj_err` potrivea "500" oriunde în text
+    # (ex: "8500 tokens"). Acum doar cod de sine stătător.
+    return any(re.search(rf"(?<!\d){c}(?!\d)", mesaj_err) for c in ERORI_FALLBACK)
+
+
 def ruleaza_agent(mesaj_user: str) -> str:
+    # FIX: fără chei, next(cycle([])) arunca StopIteration în executor
+    # (apărea ca un TypeError confuz).
+    if not _gemini_clienti:
+        return "Nu există nicio GEMINI_API_KEY configurată în .env."
+    with _LOCK_AGENT:
+        return _ruleaza_agent_blocat(mesaj_user)
+
+
+def _ruleaza_agent_blocat(mesaj_user: str) -> str:
     istoric.append(
         types.Content(role="user", parts=[types.Part(text=mesaj_user)])
     )
@@ -103,7 +124,7 @@ def ruleaza_agent(mesaj_user: str) -> str:
             return agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
         except Exception as e:
             mesaj_err = str(e)
-            if any(str(c) in mesaj_err for c in ERORI_FALLBACK):
+            if _e_eroare_de_fallback(mesaj_err):
                 time.sleep(0.5)
                 continue
             raise
@@ -171,7 +192,9 @@ async def websocket_endpoint(ws: WebSocket):
     # Blochează cross-site WebSocket hijacking: acceptă doar origini locale
     # (sau cele listate în JARVIS_ALLOWED_ORIGINS, separate prin virgulă).
     origin = ws.headers.get("origin", "")
-    if origin and origin not in _ORIGINI_PERMISE:
+    # FIX: înainte, un Origin lipsă trecea (clienți non-browser). Browserele
+    # trimit mereu Origin la WebSocket, deci cerem să fie prezent și permis.
+    if origin not in _ORIGINI_PERMISE:
         await ws.close(code=1008)
         return
     await ws.accept()

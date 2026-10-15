@@ -203,6 +203,14 @@ def status_server_http():
 # GIT
 # ==============================================================
 
+def _arg_sigur(valoare: str, nume: str) -> str:
+    """FIX: refuză valori care încep cu '-' — ar fi interpretate de git ca opțiuni
+    (--orphan, -A, --force etc.), nu ca branch/remote/fișier."""
+    if valoare and valoare.startswith("-"):
+        raise ValueError(f"Valoare invalidă pentru '{nume}': nu poate începe cu '-'.")
+    return valoare
+
+
 def _ruleaza_git(args: list[str], cale_repo: str = ".") -> str:
     """Helper intern — rulează o comandă git și returnează outputul."""
     try:
@@ -320,7 +328,7 @@ def git_checkout(branch: str, creeaza_nou: str = "nu", cale_repo: str = "."):
     args = ["checkout"]
     if creeaza_nou.lower() in ("da", "yes", "true"):
         args.append("-b")
-    args.append(branch)
+    args.append(_arg_sigur(branch, "branch"))
     return _ruleaza_git(args, cale_repo)
 
 
@@ -343,7 +351,7 @@ def git_checkout(branch: str, creeaza_nou: str = "nu", cale_repo: str = "."):
     necesita_confirmare=True,
 )
 def git_add(fisiere: str = ".", cale_repo: str = "."):
-    return _ruleaza_git(["add", fisiere], cale_repo)
+    return _ruleaza_git(["add", "--", _arg_sigur(fisiere, "fisiere")], cale_repo)
 
 
 @unealta(
@@ -394,9 +402,9 @@ def git_commit(mesaj: str, cale_repo: str = "."):
     necesita_confirmare=True,
 )
 def git_push(remote: str = "origin", branch: str = "", cale_repo: str = "."):
-    args = ["push", remote]
+    args = ["push", _arg_sigur(remote, "remote")]
     if branch:
-        args.append(branch)
+        args.append(_arg_sigur(branch, "branch"))
     return _ruleaza_git(args, cale_repo)
 
 

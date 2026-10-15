@@ -20,6 +20,7 @@ Când implementezi Faza 3, caută comentariul "FAZA 3:" din această clasă
 """
 
 import re
+import sys
 from enum import Enum
 from src.core.git_safety import creeaza_checkpoint
 
@@ -50,18 +51,25 @@ BLACKLIST_PATTERNS = [
     r"\bchown\s+-R.*root",          # schimbare owner la root recursiv
     r"\bsudo\s+rm\b",              # rm cu sudo
     r"\b(shutdown|reboot|halt|poweroff)\b",  # oprire/restart sistem
-    r"\bpasswd\b",                  # schimbare parole
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?passwd\b",  # comanda passwd (nu orice text cu "passwd")
     r"\b(useradd|userdel|usermod)\b",  # modificare utilizatori sistem
     r"\b(visudo|sudoers)\b",        # modificare privilegii sudo
     r"\bcrontab\s+-[re]",           # modificare cron jobs
     r"\b(iptables|nftables)\b",     # modificare firewall
     r"\bcurl\b.+\|\s*(bash|sh)\b",  # pipe curl direct în shell
     r"\bwget\b.+\|\s*(bash|sh)\b",  # pipe wget direct în shell
-    r"\beval\s+",                   # eval arbitrar
-    r"\bexec\s+",                   # exec arbitrar
+    r"(?:^|[;&|]\s*)(?:eval|exec)\s+",   # eval/exec ca și comandă shell
     r"\bbase64\s+(--decode|-d).*\|",  # decode base64 și pipe (ofuscare)
     r"\bpython[\d.]*\s.*-c\s+['\"]", # python -c "cod arbitrar"
-    r"\bos\.system\b|\bsubprocess\b",  # injecție de cod Python
+    # FIX: înainte `\bsubprocess\b` bloca orice text cu cuvântul "subprocess";
+    # acum doar apelurile efective.
+    r"\bos\.system\s*\(|\bsubprocess\.(run|call|Popen|check_output|check_call)\b",
+    # Adăugate: operații distructive neacoperite înainte
+    r"(?<![\w-])--force(?:-with-lease)?\b",   # git push --force
+    r"\bgit\s+reset\s+--hard\b",
+    r"\bgit\s+clean\s+-\w*f",
+    r"\bshred\b",
+    r"\bfind\b.*\s-delete\b",
 ]
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel
@@ -128,8 +136,16 @@ def cere_confirmare(nume_functie: str, argumente: dict) -> bool:
 
 def _confirmare_text(mesaj: str) -> bool:
     """Confirmare simplă prin input în terminal."""
+    # FIX: în server/widget (fără terminal) input() bloca thread-ul sau
+    # arunca EOFError. Fără canal de confirmare, refuzăm (fail closed).
+    if not sys.stdin or not sys.stdin.isatty():
+        print("[Securitate] Nu există terminal pentru confirmare — acțiune refuzată.")
+        return False
     while True:
-        raspuns = input(mesaj + "[da/nu]: ").strip().lower()
+        try:
+            raspuns = input(mesaj + "[da/nu]: ").strip().lower()
+        except EOFError:
+            return False
         if raspuns in ("da", "d", "yes", "y"):
             return True
         if raspuns in ("nu", "n", "no"):

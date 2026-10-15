@@ -93,8 +93,13 @@ def _porneste_server_background():
     def _run():
         # Importăm uvicorn și app-ul din server.py
         import uvicorn
-        from src.ui.server import app
-        uvicorn.run(app, host="0.0.0.0", port=PORT_SERVER, log_level="warning")
+        # FIX: portul trebuie setat ÎNAINTE de import, ca lista de origini
+        # permise din server.py să corespundă cu portul real al widgetului.
+        os.environ["JARVIS_PORT"] = str(PORT_SERVER)
+        from src.ui.server import app, HOST
+        # FIX: înainte era host="0.0.0.0" hardcodat (UI + agent cu unelte
+        # expuse în rețea). Acum folosește HOST din server.py (default 127.0.0.1).
+        uvicorn.run(app, host=HOST, port=PORT_SERVER, log_level="warning")
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()

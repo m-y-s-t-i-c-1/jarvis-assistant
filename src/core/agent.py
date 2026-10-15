@@ -217,7 +217,10 @@ def agent_loop(
         # Adăugăm cererea modelului în istoric
         istoric.append(continut_raspuns)
 
-        # Rulăm fiecare funcție cerută și adăugăm rezultatul în istoric
+        # Rulăm fiecare funcție cerută. FIX: toate function_response-urile
+        # dintr-o tură merg într-UN singur Content (Gemini dă 400 dacă
+        # numărul lor nu se potrivește cu cel al function_call-urilor).
+        parti_raspuns = []
         for apel in apeluri_functii:
             print(f"[Jarvis cere să ruleze funcția: {apel.name}]")
             argumente = dict(apel.args) if apel.args else {}
@@ -234,17 +237,16 @@ def agent_loop(
                 if "eroare" not in rezultat:
                     a_folosit_tool_in_aceasta_tura = True
 
-            istoric.append(
-                types.Content(
-                    role="user",
-                    parts=[types.Part(
-                        function_response=types.FunctionResponse(
-                            name=apel.name,
-                            response=rezultat
-                        )
-                    )]
+            parti_raspuns.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        name=apel.name,
+                        response=rezultat
+                    )
                 )
             )
+
+        istoric.append(types.Content(role="user", parts=parti_raspuns))
 
     return "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."
 
@@ -304,6 +306,14 @@ def _uneste_parti_stream(parti: list):
         else:
             unite.append(parte)
     return types.Content(role="model", parts=unite)
+
+
+def _fara_function_calls(continut):
+    """Returnează un Content fără part-urile function_call (sau None dacă nu rămâne nimic)."""
+    if continut is None:
+        return None
+    parti = [p for p in (continut.parts or []) if not getattr(p, "function_call", None)]
+    return types.Content(role="model", parts=parti) if parti else None
 
 
 def agent_loop_streaming(
@@ -426,8 +436,12 @@ def agent_loop_streaming(
             # cerem alt pas din buclă. Salvăm în istoric ce am generat până
             # acum (dacă avem conținut valid), ca și context pentru tura
             # următoare, și returnăm ce s-a apucat să genereze.
-            if continut_final is not None:
-                istoric.append(continut_final)
+            # FIX: scoatem function_call-urile fără răspuns — un call
+            # rămas în istoric fără function_response strică toate turele
+            # următoare (400).
+            continut_curat = _fara_function_calls(continut_final)
+            if continut_curat is not None:
+                istoric.append(continut_curat)
             print("[Agent] Generare întreruptă de barge-in.")
             return text_complet or "[întrerupt]"
 
@@ -439,6 +453,7 @@ def agent_loop_streaming(
             if continut_final is not None:
                 istoric.append(continut_final)
 
+            parti_raspuns = []  # FIX: un singur Content pentru toate răspunsurile
             for apel in apeluri_functii:
                 print(f"[Jarvis cere să ruleze funcția: {apel.name}]")
                 argumente = dict(apel.args) if apel.args else {}
@@ -452,25 +467,35 @@ def agent_loop_streaming(
                 else:
                     rezultat = ruleaza_functie(apel.name, argumente)
 
-                istoric.append(
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(
-                            function_response=types.FunctionResponse(
-                                name=apel.name,
-                                response=rezultat
-                            )
-                        )]
+                parti_raspuns.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            name=apel.name,
+                            response=rezultat
+                        )
                     )
                 )
+            istoric.append(types.Content(role="user", parts=parti_raspuns))
             continue  # continuăm bucla — cerem răspunsul următor, pe baza rezultatelor uneltelor
 
         # Fără apeluri de funcții -> răspunsul e complet
         if not text_complet.strip():
-            return "Vasea, nu am primit niciun răspuns valid. Poți reformula?"
+            # FIX: audio_loop ignoră valoarea returnată, deci mesajul
+            # trebuie rostit prin callback, altfel Jarvis rămâne mut.
+            mesaj = "Vasea, nu am primit niciun răspuns valid. Poți reformula?"
+            if la_propozitie_gata:
+                la_propozitie_gata(mesaj)
+            return mesaj
 
         if continut_final is not None:
             istoric.append(continut_final)
         return text_complet
 
     return "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."
+
+    # FIX: înainte funcția returna None aici (după MAX_PASI) și, în modul
+    # vocal, Jarvis rămânea mut.
+    mesaj = "Vasea, am depășit numărul maxim de pași de procesare. Reformulează cererea."
+    if la_propozitie_gata:
+        la_propozitie_gata(mesaj)
+    return mesaj
