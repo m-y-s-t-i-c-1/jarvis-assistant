@@ -369,6 +369,21 @@ def _consolidare_in_fundal(client):
         _lock_consolidare.release()
 
 
+def _anuleaza_tura(istoric: list, mesaj_curent) -> None:
+    """
+    FIX: rollback-ul se făcea cu un index salvat înainte de apel
+    (lungime_inainte), dar proceseaza_context() poate comprima istoricul
+    in-place (ex. 30 -> ~22 mesaje), deci indexul nu mai era valid: nu se
+    ștergea nimic, iar mesajul eșuat (+ function_call/response parțiale)
+    rămânea în istoric. Căutăm mesajul curent după identitate și tăiem de
+    la el încolo.
+    """
+    for i in range(len(istoric) - 1, -1, -1):
+        if istoric[i] is mesaj_curent:
+            del istoric[i:]
+            return
+
+
 def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
     """Bucla de conversație prin terminal."""
     print("Scrie 'exit' pentru a încheia conversația.\n")
@@ -390,10 +405,10 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             if not mesaj_utilizator.strip():
                 continue
 
-            lungime_inainte = len(istoric)
-            istoric.append(
-                types.Content(role="user", parts=[types.Part(text=mesaj_utilizator)])
+            mesaj_curent = types.Content(
+                role="user", parts=[types.Part(text=mesaj_utilizator)]
             )
+            istoric.append(mesaj_curent)
 
             try:
                 # Sliding window
@@ -407,13 +422,13 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
                 raspuns_text = ruleaza_cu_fallback(istoric, system_prompt)
             except KeyboardInterrupt:
                 print("\n[Cererea a fost întreruptă.]")
-                del istoric[lungime_inainte:]
+                _anuleaza_tura(istoric, mesaj_curent)
                 continue
             except Exception as e:
                 # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
                 # nu lasă mesajul utilizatorului "agățat" în istoric.
                 print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
-                del istoric[lungime_inainte:]
+                _anuleaza_tura(istoric, mesaj_curent)
                 continue
 
             if not raspuns_text:

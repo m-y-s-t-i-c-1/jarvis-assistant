@@ -114,7 +114,7 @@ def clasifica(text: str) -> str:
 _RASPUNSURI_SCURTE = (
     "da", "nu", "ok", "okay", "sigur", "confirm", "confirmă", "confirma",
     "anulează", "anuleaza", "renunță", "renunta", "continuă", "continua",
-    "stop", "oprește", "opreste", "gata", "bine", "corect", "exact",
+    "stop", "gata", "bine", "corect", "exact",
 )
 
 
@@ -134,4 +134,9 @@ def este_raspuns_scurt_de_continuare(text: str) -> bool:
     if not cuvinte or len(cuvinte) > 4:
         return False
 
-    return any(c in _RASPUNSURI_SCURTE for c in cuvinte)
+    # FIX: înainte era any(...): "oprește serverul", "ok deschide vscode" sau
+    # "da, deschide ecranul" erau tratate drept simple confirmări și moșteneau
+    # categoria turei precedente (ex. "conversatie" -> NVIDIA, FĂRĂ unelte),
+    # deși conțin o comandă reală. Acum TOATE cuvintele trebuie să fie
+    # confirmări; orice alt cuvânt înseamnă cerere nouă, de clasificat normal.
+    return all(c in _RASPUNSURI_SCURTE for c in cuvinte)
