@@ -1,0 +1,465 @@
+diff --git a/main.py b/main.py
+index e84994b..daa587d 100644
+--- a/main.py
++++ b/main.py
+@@ -369,6 +369,21 @@ def _consolidare_in_fundal(client):
+         _lock_consolidare.release()
+ 
+ 
++def _anuleaza_tura(istoric: list, mesaj_curent) -> None:
++    """
++    FIX: rollback-ul se făcea cu un index salvat înainte de apel
++    (lungime_inainte), dar proceseaza_context() poate comprima istoricul
++    in-place (ex. 30 -> ~22 mesaje), deci indexul nu mai era valid: nu se
++    ștergea nimic, iar mesajul eșuat (+ function_call/response parțiale)
++    rămânea în istoric. Căutăm mesajul curent după identitate și tăiem de
++    la el încolo.
++    """
++    for i in range(len(istoric) - 1, -1, -1):
++        if istoric[i] is mesaj_curent:
++            del istoric[i:]
++            return
++
++
+ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
+     """Bucla de conversație prin terminal."""
+     print("Scrie 'exit' pentru a încheia conversația.\n")
+@@ -390,10 +405,10 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
+             if not mesaj_utilizator.strip():
+                 continue
+ 
+-            lungime_inainte = len(istoric)
+-            istoric.append(
+-                types.Content(role="user", parts=[types.Part(text=mesaj_utilizator)])
++            mesaj_curent = types.Content(
++                role="user", parts=[types.Part(text=mesaj_utilizator)]
+             )
++            istoric.append(mesaj_curent)
+ 
+             try:
+                 # Sliding window
+@@ -407,13 +422,13 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
+                 raspuns_text = ruleaza_cu_fallback(istoric, system_prompt)
+             except KeyboardInterrupt:
+                 print("\n[Cererea a fost întreruptă.]")
+-                del istoric[lungime_inainte:]
++                _anuleaza_tura(istoric, mesaj_curent)
+                 continue
+             except Exception as e:
+                 # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
+                 # nu lasă mesajul utilizatorului "agățat" în istoric.
+                 print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
+-                del istoric[lungime_inainte:]
++                _anuleaza_tura(istoric, mesaj_curent)
+                 continue
+ 
+             if not raspuns_text:
+diff --git a/src/core/agent.py b/src/core/agent.py
+index 60104c8..ef92fde 100644
+--- a/src/core/agent.py
++++ b/src/core/agent.py
+@@ -273,7 +273,11 @@ def agent_loop(
+ # Potrivește sfârșitul unei propoziții: unul sau mai multe din .!? —
+ # opțional urmate de ghilimele/paranteză de închidere — apoi spațiu
+ # (sau sfârșitul textului acumulat până acum).
+-_PATTERN_SFARSIT_PROPOZITIE = re.compile(r'[.!?]+[”"\')\]]?(?:\s+|$)')
++# FIX: înainte se accepta și `$` (sfârșit de buffer) ca delimitator. În streaming,
++# un chunk poate să se termine exact după un punct dintr-un număr ("3." + "14"),
++# iar Jarvis rostea "3." ca propoziție separată. Cerem spațiu după punctuație;
++# ultima propoziție rămâne oricum rostită din `buffer_text` la finalul stream-ului.
++_PATTERN_SFARSIT_PROPOZITIE = re.compile(r'[.!?]+[”"\')\]]?\s+')
+ 
+ 
+ def _uneste_parti_stream(parti: list):
+@@ -491,11 +495,10 @@ def agent_loop_streaming(
+             istoric.append(continut_final)
+         return text_complet
+ 
+-    return "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."
+-
+-    # FIX: înainte funcția returna None aici (după MAX_PASI) și, în modul
+-    # vocal, Jarvis rămânea mut.
+-    mesaj = "Vasea, am depășit numărul maxim de pași de procesare. Reformulează cererea."
++    # FIX: înainte, acest `return` venea PRIMUL, iar blocul de dedesubt (care
++    # rostea mesajul prin callback) era cod mort — în modul vocal, după
++    # MAX_PASI, Jarvis rămânea mut. Acum mesajul se rostește și apoi se returnează.
++    mesaj = "Domnule, am întâmpinat o buclă neobișnuit de lungă de procesare. Vă recomand să reformulați cererea."
+     if la_propozitie_gata:
+         la_propozitie_gata(mesaj)
+-    return mesaj
+\ No newline at end of file
++    return mesaj
+diff --git a/src/core/audio_loop.py b/src/core/audio_loop.py
+index 02392f3..41d3a18 100644
+--- a/src/core/audio_loop.py
++++ b/src/core/audio_loop.py
+@@ -162,7 +162,7 @@ Reguli de comportament:
+ def porneste_bucla_audio(
+     istoric: list | None = None,
+     rotatie_clienti=None,
+-    model: str = "gemini-2.5-flash",
++    model: str = "gemini-3.6-flash",  # FIX: era 2.5-flash; restul proiectului folosește 3.6-flash
+ ) -> None:
+     """
+     Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
+diff --git a/src/core/monitor_ecran.py b/src/core/monitor_ecran.py
+index 1e64dbe..18d3875 100644
+--- a/src/core/monitor_ecran.py
++++ b/src/core/monitor_ecran.py
+@@ -33,7 +33,13 @@ deja dependență din vedere.py) + hash. Cost efectiv zero.
+ import time
+ import threading
+ from PIL import Image
+-import pyautogui
++try:
++    import pyautogui
++except Exception as _e_pyautogui:  # FIX: KeyError('DISPLAY') pe Wayland/headless, nu doar ImportError
++    pyautogui = None
++    _EROARE_PYAUTOGUI = f"{type(_e_pyautogui).__name__}: {_e_pyautogui}"
++else:
++    _EROARE_PYAUTOGUI = ""
+ 
+ # ── Configurare ──────────────────────────────────────────────────────────
+ INTERVAL_VERIFICARE = 3        # secunde între verificări locale (ieftine)
+@@ -68,6 +74,10 @@ class MonitorEcran:
+         self._ultimul_hash: int | None = None
+         self._schimbari_consecutive = 0
+         self._ultima_declansare: float = 0.0
++        # FIX: o schimbare detectată în perioada de răcire se pierdea (hash-ul se
++        # actualiza oricum, deci la următoarea verificare ecranul părea "stabil").
++        # O ținem minte și o declanșăm imediat ce răcirea se termină.
++        self._schimbare_in_asteptare = False
+ 
+     def a_aparut_schimbare(self) -> bool:
+         """
+@@ -92,18 +102,21 @@ class MonitorEcran:
+ 
+         if distanta < PRAG_SCHIMBARE:
+             self._schimbari_consecutive = 0
+-            return False
++        else:
++            self._schimbari_consecutive += 1
++            if self._schimbari_consecutive >= CONFIRMARI_NECESARE:
++                self._schimbare_in_asteptare = True
+ 
+-        self._schimbari_consecutive += 1
+-        if self._schimbari_consecutive < CONFIRMARI_NECESARE:
++        if not self._schimbare_in_asteptare:
+             return False
+ 
+         acum = time.time()
+         if acum - self._ultima_declansare < RACIRE_MINIMA:
+-            return False  # schimbare reală, dar suntem încă în perioada de răcire
++            return False  # schimbare reală, dar încă în răcire — rămâne în așteptare
+ 
+         self._ultima_declansare = acum
+         self._schimbari_consecutive = 0
++        self._schimbare_in_asteptare = False
+         return True
+ 
+ 
+@@ -125,6 +138,9 @@ def porneste_monitorizare_ecran(callback, interval: float = INTERVAL_VERIFICARE)
+         interval:  secunde între verificările locale (default 3, ieftin).
+     """
+     global _thread_monitorizare
++    if pyautogui is None:
++        print(f"[Monitor Ecran] Dezactivat — pyautogui indisponibil ({_EROARE_PYAUTOGUI}).")
++        return
+     _opreste_monitorizarea.clear()
+ 
+     def bucla():
+diff --git a/src/core/router.py b/src/core/router.py
+index afd54d4..ed5f691 100644
+--- a/src/core/router.py
++++ b/src/core/router.py
+@@ -114,7 +114,7 @@ def clasifica(text: str) -> str:
+ _RASPUNSURI_SCURTE = (
+     "da", "nu", "ok", "okay", "sigur", "confirm", "confirmă", "confirma",
+     "anulează", "anuleaza", "renunță", "renunta", "continuă", "continua",
+-    "stop", "oprește", "opreste", "gata", "bine", "corect", "exact",
++    "stop", "gata", "bine", "corect", "exact",
+ )
+ 
+ 
+@@ -134,4 +134,9 @@ def este_raspuns_scurt_de_continuare(text: str) -> bool:
+     if not cuvinte or len(cuvinte) > 4:
+         return False
+ 
+-    return any(c in _RASPUNSURI_SCURTE for c in cuvinte)
+\ No newline at end of file
++    # FIX: înainte era any(...): "oprește serverul", "ok deschide vscode" sau
++    # "da, deschide ecranul" erau tratate drept simple confirmări și moșteneau
++    # categoria turei precedente (ex. "conversatie" -> NVIDIA, FĂRĂ unelte),
++    # deși conțin o comandă reală. Acum TOATE cuvintele trebuie să fie
++    # confirmări; orice alt cuvânt înseamnă cerere nouă, de clasificat normal.
++    return all(c in _RASPUNSURI_SCURTE for c in cuvinte)
+\ No newline at end of file
+diff --git a/src/core/subagenti.py b/src/core/subagenti.py
+index 67048ed..83b57a1 100644
+--- a/src/core/subagenti.py
++++ b/src/core/subagenti.py
+@@ -28,6 +28,7 @@ cu vedere.py), independentă de rotația din main.py.
+ """
+ 
+ import os
++import re
+ import itertools
+ from dotenv import load_dotenv
+ from google import genai
+@@ -48,7 +49,8 @@ _rotatie_subagenti = itertools.cycle(_clienti_subagenti) if _clienti_subagenti e
+ 
+ MODEL_SUBAGENTI = "gemini-3.6-flash"
+ 
+-_ERORI_FALLBACK = (403, 429, 500, 503)
++_ERORI_FALLBACK = (403, 429, 500, 502, 503, 504)
++_MARCAJE_TEMPORARE = ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "OVERLOADED", "DEADLINE_EXCEEDED")
+ try:
+     import httpx
+     _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)
+@@ -57,7 +59,23 @@ except ImportError:
+ 
+ 
+ def _eroare_temporara(e: Exception) -> bool:
+-    return any(str(cod) in str(e) for cod in _ERORI_FALLBACK) or isinstance(e, _EXCEPTII_RETEA)
++    """
++    FIX: înainte se căuta `str(cod) in str(e)` (substring), deci o eroare reală
++    (ex. 400 cu "max_output_tokens=5000" sau un request-id cu "...4035...")
++    era tratată ca temporară: se consumau toate cheile și utilizatorul primea
++    "toate cheile au eșuat" în loc de eroarea adevărată. Aceeași corecție ca în
++    main.py: întâi atributul de cod al excepției, apoi cod de sine stătător.
++    """
++    if _EXCEPTII_RETEA and isinstance(e, _EXCEPTII_RETEA):
++        return True
++    for atribut in ("code", "status_code"):
++        cod = getattr(e, atribut, None)
++        if isinstance(cod, int) and cod in _ERORI_FALLBACK:
++            return True
++    mesaj = str(e)
++    if any(re.search(rf"(?<!\d){cod}(?!\d)", mesaj) for cod in _ERORI_FALLBACK):
++        return True
++    return any(m in mesaj.upper() for m in _MARCAJE_TEMPORARE)
+ 
+ 
+ # ── Configurația celor 3 sub-agenți ──────────────────────────────────────────
+diff --git a/src/tools/control_ecran.py b/src/tools/control_ecran.py
+index 7860b38..826a9cb 100644
+--- a/src/tools/control_ecran.py
++++ b/src/tools/control_ecran.py
+@@ -30,15 +30,36 @@ mută mouse-ul manual în colțul stânga-sus al ecranului (0, 0) — pyautogui
+ aruncă o excepție și oprește execuția (pyautogui.FAILSAFE = True).
+ """
+ 
+-import pyautogui
++# FIX: `import pyautogui` la nivel de modul arunca KeyError('DISPLAY') fără server
++# grafic X11 (Wayland, SSH, serviciu systemd), iar `src/tools/__init__.py` importă
++# acest fișier necondiționat -> TOATĂ aplicația (main, server, voce) nu mai pornea.
++# Acum doar uneltele de ecran devin indisponibile; restul lui Jarvis merge.
++try:
++    import pyautogui
++except Exception as _e_pyautogui:  # FIX: KeyError('DISPLAY') pe Wayland/headless, nu doar ImportError
++    pyautogui = None
++    _EROARE_PYAUTOGUI = f"{type(_e_pyautogui).__name__}: {_e_pyautogui}"
++else:
++    _EROARE_PYAUTOGUI = ""
+ from src.core.registry import unealta
+ 
+ # Pauză de siguranță după fiecare acțiune pyautogui, ca interfața să aibă
+ # timp să reacționeze înainte de comanda următoare.
+-pyautogui.PAUSE = 0.2
++if pyautogui is not None:
++    pyautogui.PAUSE = 0.2
+ 
+ # Failsafe activ — mișcă mouse-ul în (0,0) ca să oprești orice automatizare.
+-pyautogui.FAILSAFE = True
++if pyautogui is not None:
++    pyautogui.FAILSAFE = True
++
++
++def _cere_pyautogui():
++    if pyautogui is None:
++        raise RuntimeError(
++            "Controlul ecranului nu e disponibil pe această sesiune "
++            f"(pyautogui nu a putut porni: {_EROARE_PYAUTOGUI}). "
++            "Necesită X11 cu DISPLAY setat; pe Wayland nu funcționează."
++        )
+ 
+ 
+ @unealta(
+@@ -60,6 +81,7 @@ pyautogui.FAILSAFE = True
+ def muta_mouse(x: int, y: int, durata: float = 0.3):
+     """Mută mouse-ul la coordonate exacte, fără nicio acțiune de click."""
+     try:
++        _cere_pyautogui()
+         pyautogui.moveTo(int(x), int(y), duration=float(durata))
+         return f"Mouse mutat la ({x}, {y})."
+     except Exception as e:
+@@ -87,6 +109,7 @@ def muta_mouse(x: int, y: int, durata: float = 0.3):
+ def click_la_pozitie(x: int, y: int, tip: str = "stanga"):
+     """Mută mouse-ul la (x, y) și execută click-ul cerut."""
+     try:
++        _cere_pyautogui()
+         pyautogui.moveTo(int(x), int(y), duration=0.2)
+         tip = tip.lower().strip()
+         if tip == "dreapta":
+@@ -119,6 +142,7 @@ def click_la_pozitie(x: int, y: int, tip: str = "stanga"):
+ def scrie_text(text: str, interval: float = 0.02):
+     """Tastează un text la poziția curentă de focus."""
+     try:
++        _cere_pyautogui()
+         pyautogui.write(text, interval=float(interval))
+         return f"Text scris ({len(text)} caractere)."
+     except Exception as e:
+@@ -143,6 +167,7 @@ def scrie_text(text: str, interval: float = 0.02):
+ def apasa_tasta(tasta: str):
+     """Apasă o tastă sau o combinație de taste."""
+     try:
++        _cere_pyautogui()
+         parti = [p.strip() for p in tasta.lower().split("+") if p.strip()]
+         if not parti:
+             return "Nicio tastă specificată."
+@@ -170,6 +195,7 @@ def apasa_tasta(tasta: str):
+ def deruleaza(cantitate: int):
+     """Derulează la poziția curentă a mouse-ului."""
+     try:
++        _cere_pyautogui()
+         pyautogui.scroll(int(cantitate))
+         return f"Derulat {cantitate} unități."
+     except Exception as e:
+@@ -186,6 +212,7 @@ def deruleaza(cantitate: int):
+ def status_ecran():
+     """Informații rapide despre ecran și poziția mouse-ului."""
+     try:
++        _cere_pyautogui()
+         latime, inaltime = pyautogui.size()
+         x, y = pyautogui.position()
+         return f"Rezoluție ecran: {latime}x{inaltime}. Cursor la: ({x}, {y})."
+diff --git a/src/tools/timp.py b/src/tools/timp.py
+index ccd458f..c40c5b0 100644
+--- a/src/tools/timp.py
++++ b/src/tools/timp.py
+@@ -3,6 +3,16 @@
+ from datetime import datetime
+ from src.core.registry import unealta
+ 
++# FIX: get_ora_curenta întorcea doar "HH:MM, ZZ.LL.AAAA". Router-ul și descrierea
++# uneltei o prezintă ca singura sursă pentru "ce zi e azi" / "ce lună e", dar
++# ziua săptămânii și numele lunii lipseau — modelul trebuia să le calculeze din
++# cap (exact ce i se interzice). Le oferim explicit, în română.
++_ZILE = ("luni", "marți", "miercuri", "joi", "vineri", "sâmbătă", "duminică")
++_LUNI = (
++    "ianuarie", "februarie", "martie", "aprilie", "mai", "iunie",
++    "iulie", "august", "septembrie", "octombrie", "noiembrie", "decembrie",
++)
++
+ 
+ @unealta(
+     description=(
+@@ -16,6 +26,9 @@ from src.core.registry import unealta
+     ),
+ )
+ def get_ora_curenta():
+-    """Returnează ora curentă a sistemului, ca text."""
++    """Returnează ora, ziua săptămânii și data curentă a sistemului, ca text."""
+     acum = datetime.now()
+-    return acum.strftime("%H:%M, %d.%m.%Y")
+\ No newline at end of file
++    return (
++        f"{acum:%H:%M}, {_ZILE[acum.weekday()]}, {acum.day} "
++        f"{_LUNI[acum.month - 1]} {acum.year} ({acum:%d.%m.%Y})"
++    )
+diff --git a/src/tools/vedere.py b/src/tools/vedere.py
+index fa08581..9493308 100644
+--- a/src/tools/vedere.py
++++ b/src/tools/vedere.py
+@@ -35,7 +35,13 @@ import json
+ import itertools
+ from io import BytesIO
+ 
+-import pyautogui
++try:
++    import pyautogui
++except Exception as _e_pyautogui:  # FIX: KeyError('DISPLAY') pe Wayland/headless, nu doar ImportError
++    pyautogui = None
++    _EROARE_PYAUTOGUI = f"{type(_e_pyautogui).__name__}: {_e_pyautogui}"
++else:
++    _EROARE_PYAUTOGUI = ""
+ from dotenv import load_dotenv
+ from google import genai
+ from google.genai import types
+@@ -101,6 +107,11 @@ def _genereaza_cu_fallback(**kwargs):
+ 
+ def _screenshot_bytes() -> tuple[bytes, int, int]:
+     """Face un screenshot și returnează (bytes PNG, lățime, înălțime)."""
++    if pyautogui is None:
++        raise RuntimeError(
++            f"Captura de ecran nu e disponibilă (pyautogui nu a putut porni: {_EROARE_PYAUTOGUI}). "
++            "Necesită X11 cu DISPLAY setat."
++        )
+     imagine = pyautogui.screenshot()
+     latime, inaltime = imagine.size
+     buffer = BytesIO()
+diff --git a/src/ui/server.py b/src/ui/server.py
+index 7ae3a74..6dbcec2 100644
+--- a/src/ui/server.py
++++ b/src/ui/server.py
+@@ -112,23 +112,45 @@ def ruleaza_agent(mesaj_user: str) -> str:
+         return _ruleaza_agent_blocat(mesaj_user)
+ 
+ 
+-def _ruleaza_agent_blocat(mesaj_user: str) -> str:
+-    istoric.append(
+-        types.Content(role="user", parts=[types.Part(text=mesaj_user)])
+-    )
+-    proceseaza_context(istoric, sesiune_id, client=next(_gemini_rotatie))
++def _anuleaza_tura(mesaj_curent) -> None:
++    """
++    FIX: dacă agent_loop pica (eroare fatală sau toate cheile indisponibile),
++    mesajul utilizatorului rămânea în `istoric` global fără răspuns, iar
++    următorul mesaj producea "user" consecutiv (+ eventuale function_call
++    parțiale). Tăiem de la mesajul curent încolo, după identitate (nu după
++    index: proceseaza_context poate comprima lista in-place).
++    """
++    for i in range(len(istoric) - 1, -1, -1):
++        if istoric[i] is mesaj_curent:
++            del istoric[i:]
++            return
+ 
+-    for _ in range(len(_gemini_clienti)):
+-        client = next(_gemini_rotatie)
+-        try:
+-            return agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
+-        except Exception as e:
+-            mesaj_err = str(e)
+-            if _e_eroare_de_fallback(mesaj_err):
+-                time.sleep(0.5)
+-                continue
+-            raise
+ 
++def _ruleaza_agent_blocat(mesaj_user: str) -> str:
++    mesaj_curent = types.Content(role="user", parts=[types.Part(text=mesaj_user)])
++    istoric.append(mesaj_curent)
++    try:
++        proceseaza_context(istoric, sesiune_id, client=next(_gemini_rotatie))
++
++        for _ in range(len(_gemini_clienti)):
++            client = next(_gemini_rotatie)
++            try:
++                raspuns = agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
++            except Exception as e:
++                if _e_eroare_de_fallback(str(e)):
++                    time.sleep(0.5)
++                    continue
++                raise
++            # agent_loop poate întoarce un mesaj explicativ (răspuns gol/blocat,
++            # buclă prea lungă) fără să-l adauge în istoric -> păstrăm alternanța.
++            if raspuns and getattr(istoric[-1], "role", None) != "model":
++                istoric.append(types.Content(role="model", parts=[types.Part(text=raspuns)]))
++            return raspuns
++    except Exception:
++        _anuleaza_tura(mesaj_curent)
++        raise
++
++    _anuleaza_tura(mesaj_curent)
+     return "Toate cheile Gemini sunt indisponibile momentan."
+ 
+ 
