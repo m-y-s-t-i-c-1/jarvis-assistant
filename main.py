@@ -398,7 +398,8 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
                 print("\nJarvis: La revedere, Vasea.")
                 break
 
-            if mesaj_utilizator.strip().lower() in ("exit", "quit", "stop"):
+            # FIX: \"stop\" era și răspuns de anulare la confirmări -> ieșea din aplicație
+            if mesaj_utilizator.strip().lower() in ("exit", "quit", "/exit"):
                 print("Jarvis: La revedere, Vasea.")
                 break
 

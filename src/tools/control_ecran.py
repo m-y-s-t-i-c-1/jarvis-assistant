@@ -143,7 +143,17 @@ def scrie_text(text: str, interval: float = 0.02):
     """Tastează un text la poziția curentă de focus."""
     try:
         _cere_pyautogui()
-        pyautogui.write(text, interval=float(interval))
+        if text.isascii():
+            pyautogui.write(text, interval=float(interval))
+        else:
+            # FIX: pyautogui.write() ignoră ă â î ș ț (nu sunt pe layout-ul US) ->
+            # textul românesc ieșea mutilat. xdotool tastează Unicode corect pe X11.
+            import shutil, subprocess
+            if not shutil.which("xdotool"):
+                return ("Textul conține diacritice, iar pyautogui nu le poate tasta. "
+                        "Instalează xdotool (sudo pacman -S xdotool).")
+            subprocess.run(["xdotool", "type", "--delay", str(int(float(interval) * 1000)), "--", text],
+                           check=True, timeout=60)
         return f"Text scris ({len(text)} caractere)."
     except Exception as e:
         return f"Eroare la scriere: {str(e)}"

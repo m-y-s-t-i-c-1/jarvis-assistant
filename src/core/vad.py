@@ -25,6 +25,7 @@ acustic al lui Jarvis în timpul redării TTS.
 """
 
 import threading
+from collections import deque
 import numpy as np
 import sounddevice as sd
 import torch
@@ -43,6 +44,11 @@ PRAG_PROBABILITATE_VORBIRE = 0.5
 # Durată maximă a unui enunț, ca plasă de siguranță (evită buffer infinit
 # dacă cineva vorbește foarte mult fără pauză)
 DURATA_MAXIMA_SECUNDE = 30
+
+# FIX: fără pre-roll, primele ~100-300ms (începutul primului cuvânt) se pierdeau,
+# iar un singur bloc de zgomot declanșa transcrierea (Whisper halucinează text pe zgomot).
+BLOCURI_PRE_ROLL = 10          # ~320 ms păstrate dinaintea detectării
+MIN_BLOCURI_VORBIRE = 8        # ~256 ms de vorbire reală, altfel ignorăm
 
 
 class DetectorActivitateVocala:
@@ -104,8 +110,15 @@ class DetectorActivitateVocala:
             nu s-a detectat nicio vorbire (timeout de siguranță).
         """
         buffer_audio = []
+        pre_roll = deque(maxlen=BLOCURI_PRE_ROLL)
+        blocuri_vorbire = 0
         blocuri_tacere_consecutive = 0
         a_inceput_vorbirea = False
+
+        # FIX: Silero e stateful; starea de la enunțul anterior / de la barge-in
+        # influența detecția următoare.
+        with self._lock_model:
+            self.model.reset_states()
 
         # Câte blocuri de tăcere consecutive înseamnă "pauză suficientă"
         blocuri_pentru_pauza = int(
@@ -138,7 +151,9 @@ class DetectorActivitateVocala:
                     if not a_inceput_vorbirea:
                         print("[Vorbire detectată — ascult]")
                         a_inceput_vorbirea = True
+                        buffer_audio.extend(pre_roll)
                     buffer_audio.append(bloc_flat)
+                    blocuri_vorbire += 1
                     blocuri_tacere_consecutive = 0
 
                 elif a_inceput_vorbirea:
@@ -150,11 +165,11 @@ class DetectorActivitateVocala:
                         print("[Pauză detectată — enunț complet]")
                         break
 
-                # Dacă nu a început încă vorbirea și tot tăcere e, continuăm
-                # să așteptăm, fără să acumulăm nimic (evită buffer gol lung)
+                else:
+                    pre_roll.append(bloc_flat)
 
-        if not buffer_audio:
-            print("[Nicio vorbire detectată]")
+        if not buffer_audio or blocuri_vorbire < MIN_BLOCURI_VORBIRE:
+            print("[Nicio vorbire detectată (sau prea scurtă/zgomot)]")
             return None
 
         return np.concatenate(buffer_audio).reshape(-1, 1)

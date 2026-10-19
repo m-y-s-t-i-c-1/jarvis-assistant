@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>Jarvis Widget</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
 <style>
 :root {
   --glass:   rgba(12,18,30,0.82);
@@ -443,7 +444,7 @@ function addJarvis(text) {
   if (w) w.remove();
   const d = document.createElement('div');
   d.className = 'w-msg jarvis';
-  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${marked.parse(text)}</div>`;
+  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${DOMPurify.sanitize(marked.parse(text))}</div>`;
   document.getElementById('w-messages').appendChild(d);
   scroll();
 }

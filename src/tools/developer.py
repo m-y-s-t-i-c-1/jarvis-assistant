@@ -11,6 +11,7 @@ necesita_confirmare=True și trec prin mecanismul din Task 2.3.
 """
 
 import subprocess
+import shlex
 import os
 import signal
 import sys
@@ -351,7 +352,9 @@ def git_checkout(branch: str, creeaza_nou: str = "nu", cale_repo: str = "."):
     necesita_confirmare=True,
 )
 def git_add(fisiere: str = ".", cale_repo: str = "."):
-    return _ruleaza_git(["add", "--", _arg_sigur(fisiere, "fisiere")], cale_repo)
+    # FIX: \"a.py b.py\" era trimis ca UN singur pathspec -> \"did not match any files\"
+    cai = [_arg_sigur(f, "fisiere") for f in shlex.split(fisiere or ".")] or ["."]
+    return _ruleaza_git(["add", "--", *cai], cale_repo)
 
 
 @unealta(

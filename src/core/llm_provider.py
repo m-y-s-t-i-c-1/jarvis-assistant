@@ -477,7 +477,13 @@ def _istoric_la_mesaje_openai(istoric: list, system_prompt: str) -> list[dict]:
         if not hasattr(continut, "parts"): continue
         text = " ".join(p.text for p in continut.parts if hasattr(p, "text") and p.text)
         if not text: continue
-        mesaje.append({"role": "user" if continut.role == "user" else "assistant", "content": text})
+        rol = "user" if continut.role == "user" else "assistant"
+        # FIX: turele cu function_call/function_response se elimină (nu au text), deci apăreau
+        # roluri consecutive identice; modele precum Codestral/Mistral răspund 400.
+        if len(mesaje) > 1 and mesaje[-1]["role"] == rol:
+            mesaje[-1]["content"] += "\n" + text
+        else:
+            mesaje.append({"role": rol, "content": text})
     return mesaje
 
 istoric_la_mesaje_openai = _istoric_la_mesaje_openai

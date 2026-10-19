@@ -20,6 +20,7 @@ să trecem la clasificare printr-un apel LLM rapid.
 """
 
 import re
+import unicodedata
 
 # Cuvinte care indică nevoie de o unealtă reală (control sistem, ecran,
 # git, calendar, hardware, vreme, căutare) — dacă apar, mergem direct pe
@@ -58,6 +59,13 @@ CUVINTE_UNELTE = (
     "care e data", "care este data",
     # joburi fundal
     "job", "rulează în fundal", "ruleaza in fundal",
+    # FIX: forme flexionate românești (\"*\" = orice terminație). Înainte \"volumul\",
+    # \"calendarul\", \"luminozitatea\", \"procesorul\", \"temperatură\" cădeau pe
+    # \"conversatie\" (NVIDIA, fără unelte) și Jarvis nu putea acționa.
+    "volum*", "luminozitat*", "temperatur*", "calendar*", "eveniment*",
+    "procesor*", "ecran*", "sunet*", "prognoz*", "plou*", "vremea",
+    "spati* pe disc", "pe disc", "spati* liber*", "memori* ram", "memori* liber*",
+    "cat de incarcat", "cat de cald", "cat de incet", "serverul", "commit*",
 )
 
 # Cuvinte care indică o întrebare tehnică / de cod (fără unealtă)
@@ -72,6 +80,14 @@ CUVINTE_COD = (
 )
 
 
+def _fara_diacritice(t: str) -> str:
+    """ă,â,î,ș,ț -> a,a,i,s,t (și ş/ţ cu sedilă), ca \"temperatură\" == \"temperatura\"."""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", t.lower())
+        if unicodedata.category(c) != "Mn"
+    )
+
+
 def _contine_expresie(text_lower: str, expresii: tuple) -> bool:
     """
     FIX: înainte se folosea `cuvant in text_lower` (substring), deci "ram"
@@ -80,9 +96,13 @@ def _contine_expresie(text_lower: str, expresii: tuple) -> bool:
     cereri banale erau trimise greșit pe Gemini/NVIDIA. Acum cerem
     limite de cuvânt la început și la sfârșitul expresiei.
     """
-    return any(
-        re.search(rf"(?<!\w){re.escape(e)}(?!\w)", text_lower) for e in expresii
-    )
+    text_n = _fara_diacritice(text_lower)
+    for e in expresii:
+        # "*" la finalul unui cuvânt = acceptă orice terminație (flexiuni RO)
+        pat = re.escape(_fara_diacritice(e)).replace(r"\*", r"\w*")
+        if re.search(rf"(?<!\w){pat}(?!\w)", text_n):
+            return True
+    return False
 
 
 def clasifica(text: str) -> str:

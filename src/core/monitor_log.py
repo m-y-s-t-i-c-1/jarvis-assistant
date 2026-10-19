@@ -105,7 +105,7 @@ def porneste_monitorizare_log(callback):
     threading.Thread(
         target=_urmareste_sursa,
         args=(
-            ["journalctl", "--user", "-f", "-p", "err..emerg", "--no-pager"],
+            ["journalctl", "--user", "-f", "-n", "0", "-p", "err..emerg", "--no-pager"],
             "jurnal sistem",
             callback,
         ),
@@ -114,7 +114,7 @@ def porneste_monitorizare_log(callback):
 
     threading.Thread(
         target=_urmareste_sursa,
-        args=(["dmesg", "-w"], "kernel", callback),
+        args=(["dmesg", "-W"], "kernel", callback),
         daemon=True,
     ).start()
 

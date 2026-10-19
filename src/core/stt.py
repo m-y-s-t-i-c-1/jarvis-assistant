@@ -75,7 +75,12 @@ def transcrie(audio: np.ndarray) -> str:
     )
 
     # segmente e un generator — trebuie consumat ca să obținem textul
-    text_complet = " ".join(segment.text.strip() for segment in segmente)
+    # FIX: pe zgomot/liniște Whisper inventează text (\"Mulțumesc pentru vizionare\")
+    # care ajungea ca mesaj real la Gemini. Eliminăm segmentele probabil fără vorbire.
+    text_complet = " ".join(
+        s.text.strip() for s in segmente
+        if not (s.no_speech_prob > 0.6 and s.avg_logprob < -1.0)
+    )
     print(f"[TIMP] Transcriere Whisper: {time.perf_counter() - _start:.2f}s")
 
     return text_complet.strip()

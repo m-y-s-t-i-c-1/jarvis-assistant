@@ -132,6 +132,7 @@ def porneste_cu_wake_word(
     print("  Ctrl+C pentru a opri.")
     print("═" * 50 + "\n")
 
+    erori_consecutive = 0
     while True:
         try:
             print("💤 Aștept wake word...")
@@ -158,13 +159,19 @@ def porneste_cu_wake_word(
             )
 
             print("\n[Revin la ascultarea pasivă...]\n")
+            erori_consecutive = 0
             time.sleep(PAUZA_DUPA_ACTIVARE)
 
         except KeyboardInterrupt:
             print("\n[Wake Word] Oprit.")
             break
         except Exception as e:
-            print(f"[Wake Word] Eroare: {e}. Reiau în 2s...")
+            erori_consecutive += 1
+            print(f"[Wake Word] Eroare: {e}. ({erori_consecutive}/5)")
+            # FIX: fără microfon/model, bucla repeta eroarea la infinit din 2 în 2 secunde
+            if erori_consecutive >= 5:
+                print("[Wake Word] Prea multe erori consecutive — ascultarea pasivă se oprește.")
+                return
             time.sleep(2)
 
 

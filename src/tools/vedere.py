@@ -68,14 +68,25 @@ _ERORI_FALLBACK = (403, 429, 500, 503)
 
 try:
     import httpx
-    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)
+    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)
 except ImportError:
     _EXCEPTII_RETEA = ()
 
 
 def _eroare_temporara(e: Exception) -> bool:
-    are_cod_cunoscut = any(str(cod) in str(e) for cod in _ERORI_FALLBACK)
-    return are_cod_cunoscut or isinstance(e, _EXCEPTII_RETEA)
+    # FIX: varianta veche căuta \"500\" ca substring (ex. \"max_tokens=5000\") și nu
+    # recunoștea 502/504 sau ReadError. Aceeași logică ca în main.py.
+    import re as _re
+    if _EXCEPTII_RETEA and isinstance(e, _EXCEPTII_RETEA):
+        return True
+    for atribut in ("code", "status_code"):
+        cod = getattr(e, atribut, None)
+        if isinstance(cod, int) and cod in _ERORI_FALLBACK + (502, 504):
+            return True
+    mesaj = str(e)
+    if any(_re.search(rf"(?<!\d){c}(?!\d)", mesaj) for c in _ERORI_FALLBACK + (502, 504)):
+        return True
+    return any(m in mesaj.upper() for m in ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "OVERLOADED", "DEADLINE_EXCEEDED"))
 
 
 def _genereaza_cu_fallback(**kwargs):

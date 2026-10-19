@@ -30,7 +30,14 @@ _PATTERN_HALUCINATIE = re.compile(
 )
 
 
+# FIX: \"nu am rulat comanda\" / \"ai refuzat\" conțin \"am rulat\" și forțau un
+# apel de unealtă (mode=ANY) exact după ce utilizatorul REFUZASE confirmarea.
+_PATTERN_NEGATIE = re.compile(r"\b(nu|n-am|n-a|anulat|refuzat|blocat|imposibil)\b", re.IGNORECASE)
+
+
 def _raspunsul_pare_suspect(text: str) -> bool:
+    if _PATTERN_NEGATIE.search(text):
+        return False
     return bool(_PATTERN_HALUCINATIE.search(text))
 
 

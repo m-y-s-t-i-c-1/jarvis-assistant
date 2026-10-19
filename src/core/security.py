@@ -70,6 +70,7 @@ BLACKLIST_PATTERNS = [
     r"\bgit\s+clean\s+-\w*f",
     r"\bshred\b",
     r"\bfind\b.*\s-delete\b",
+    r"\bfind\b.*-exec\s+rm\b",   # FIX: ocolea regula de mai sus
 ]
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel
@@ -88,6 +89,23 @@ _FUNCTII_FARA_SAFETY_NET = {
 }
 
 
+# FIX: blacklist-ul scana TOATE argumentele, deci text liber legitim era blocat
+# (git commit -m \"fix shutdown handler\", eveniment \"Reboot router\", căutarea
+# \"cum fac shutdown\", sarcina dată unui sub-agent). Parametrii de mai jos sunt
+# text liber, nu comenzi: nu se scanează. Sub-agenții își trec oricum uneltele
+# prin securitate la execuție.
+_PARAMETRI_TEXT_LIBER = {
+    "git_commit": {"mesaj"}, "git_stash": {"mesaj"},
+    "creeaza_eveniment": {"titlu", "descriere"},
+    "cauta_web": {"interogare"},
+    "porneste_job_fundal": {"descriere"},
+    "deleaga_agent_software": {"sarcina"},
+    "deleaga_agent_devops": {"sarcina"},
+    "deleaga_agent_cercetare": {"sarcina"},
+    "gaseste_pe_ecran": {"element"}, "vezi_ecranul": {"intrebare"},
+}
+
+
 def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
     """
     Verifică dacă argumentele unui apel de funcție conțin pattern-uri periculoase.
@@ -96,7 +114,10 @@ def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
         (True, "") dacă apelul e curat
         (False, motiv) dacă e blocat
     """
-    text_de_verificat = " ".join(str(v) for v in argumente.values())
+    exceptate = _PARAMETRI_TEXT_LIBER.get(nume_functie, set())
+    text_de_verificat = " ".join(
+        str(v) for k, v in argumente.items() if k not in exceptate
+    )
 
     for pattern in _BLACKLIST_COMPILED:
         if pattern.search(text_de_verificat):
