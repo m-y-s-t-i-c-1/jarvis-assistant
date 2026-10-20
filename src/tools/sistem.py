@@ -29,7 +29,9 @@ ALIAS_COMENZI = {
     "lista_fisiere": ["ls", "-la"],
     "spatiu_disc": ["df", "-h"],
     "memorie_ram": ["free", "-h"],
-    "procese_active": ["ps", "aux"],
+    # FIX: `ps aux` e sortat după PID; cu max_linii=35 se vedeau doar procesele vechi (systemd,
+    # kthreadd), nu cele care consumă CPU. Sortăm descrescător după CPU.
+    "procese_active": ["ps", "aux", "--sort=-%cpu"],
     "timp_functionare": ["uptime"],
     "utilizator_curent": ["whoami"],
     "director_curent": ["pwd"],

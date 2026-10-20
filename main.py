@@ -22,7 +22,8 @@ from src.core.monitor_ecran import porneste_monitorizare_ecran
 from src.core.monitor_log import porneste_monitorizare_log
 from src.tools.vedere import analizeaza_ecran_complet
 from src.core.tts import spune
-from src.core.stare_conversatie import conversatie_activa
+from src.core.stare_conversatie import conversatie_activa, lock_istoric
+from src.core.context_rag import prompt_pentru_tura
 from src.core.llm_provider import (
     intreaba_nvidia_conversatie,
     intreaba_nvidia_cod,
@@ -210,7 +211,8 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
     if groq_client:
         print("[Toate cheile Gemini sunt indisponibile — comut pe Groq]")
         try:
-            rezultat_groq = groq_fallback(istoric, system_prompt)
+            # FIX: Groq nu are unelte; fără avertisment, promptul îi spune că poate controla sistemul -> acțiuni „făcute" inventate.
+            rezultat_groq = groq_fallback(istoric, AVERTISMENT_NVIDIA_FARA_UNELTE + "\n\n" + system_prompt)
             if rezultat_groq:
                 return rezultat_groq
         except Exception as e:
@@ -218,7 +220,7 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
     else:
         print("[Toate cheile Gemini sunt indisponibile și Groq nu e configurat — încerc cascada externă]")
 
-    rezultat_extern = ruleaza_cascada_externa(istoric, system_prompt)
+    rezultat_extern = ruleaza_cascada_externa(istoric, AVERTISMENT_NVIDIA_FARA_UNELTE + "\n\n" + system_prompt)
     if rezultat_extern:
         return rezultat_extern
 
@@ -406,31 +408,35 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             if not mesaj_utilizator.strip():
                 continue
 
-            mesaj_curent = types.Content(
-                role="user", parts=[types.Part(text=mesaj_utilizator)]
-            )
-            istoric.append(mesaj_curent)
-
-            try:
-                # Sliding window
-                proceseaza_context(
-                    istoric, sesiune_id,
-                    client=urmatorul_client(), model=GEMINI_MODEL,
+            # FIX: tura întreagă sub lock — wake-word rulează pe alt thread cu același `istoric`.
+            with lock_istoric:
+                mesaj_curent = types.Content(
+                    role="user", parts=[types.Part(text=mesaj_utilizator)]
                 )
-                _curata_inceput_istoric(istoric)
+                istoric.append(mesaj_curent)
 
-                # Răspuns
-                raspuns_text = ruleaza_cu_fallback(istoric, system_prompt)
-            except KeyboardInterrupt:
-                print("\n[Cererea a fost întreruptă.]")
-                _anuleaza_tura(istoric, mesaj_curent)
-                continue
-            except Exception as e:
-                # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
-                # nu lasă mesajul utilizatorului "agățat" în istoric.
-                print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
-                _anuleaza_tura(istoric, mesaj_curent)
-                continue
+                try:
+                    # Sliding window
+                    proceseaza_context(
+                        istoric, sesiune_id,
+                        client=urmatorul_client(), model=GEMINI_MODEL,
+                    )
+                    _curata_inceput_istoric(istoric)
+
+                    # Răspuns
+                    # Profil + amintiri proaspete + context RAG pentru tura curentă
+                    prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT_BAZA, system_prompt, mesaj_utilizator, sesiune_id)
+                    raspuns_text = ruleaza_cu_fallback(istoric, prompt_tura)
+                except KeyboardInterrupt:
+                    print("\n[Cererea a fost întreruptă.]")
+                    _anuleaza_tura(istoric, mesaj_curent)
+                    continue
+                except Exception as e:
+                    # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
+                    # nu lasă mesajul utilizatorului "agățat" în istoric.
+                    print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
+                    _anuleaza_tura(istoric, mesaj_curent)
+                    continue
 
             if not raspuns_text:
                 raspuns_text = "Vasea, nu am primit niciun răspuns de la provideri. Reîncearcă."
@@ -563,7 +569,7 @@ def _la_eroare_log(sursa: str, linie: str):
     print(f"\n🔔 [Jarvis observă — {sursa}]: {linie}\nTu: ", end="", flush=True)
 
 
-def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_gemini):
+def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_gemini, sesiune_id=None):
     """
     Ascultare pasivă ("Hey Jarvis"), pornită în fundal INDIFERENT de modul de
     interacțiune ales. Eșuează elegant dacă dependențele audio lipsesc.
@@ -583,6 +589,7 @@ def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_
                 istoric=istoric_ref,
                 rotatie_clienti=rotatie_clienti,
                 model_gemini=model_gemini,
+                sesiune_id=sesiune_id,
             )
         except Exception as e:
             print(f"[Senzorial] Ascultare pasivă oprită din cauza unei erori: {e}")
@@ -634,6 +641,7 @@ def main():
                 istoric=istoric,
                 rotatie_clienti=_gemini_rotatie,
                 model_gemini=GEMINI_MODEL,
+                sesiune_id=sesiune_id,
             )
         except KeyboardInterrupt:
             print("\nJarvis: La revedere, Vasea.")
@@ -650,6 +658,7 @@ def main():
                 "istoric": istoric,
                 "rotatie_clienti": _gemini_rotatie,
                 "model_gemini": GEMINI_MODEL,
+                "sesiune_id": sesiune_id,
             },
             daemon=True,
         ).start()
@@ -658,7 +667,7 @@ def main():
 
     else:
         # Modul implicit [1]: text în terminal + ascultare pasivă în fundal (Task 6.8).
-        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL)
+        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
         bucla_text(istoric, sesiune_id, system_prompt)
 
 

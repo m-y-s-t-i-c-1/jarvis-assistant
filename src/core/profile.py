@@ -69,6 +69,10 @@ class ProfilUtilizator:
             existent = db.get_profil(cheie)
             if not existent:
                 db.seteaza_profil(cheie, valoare_implicita)
+            elif cheie in ("director_proiect", "venv_path") and not Path(existent).exists():
+                # FIX: căile derivate din locația repo-ului se salvau o singură dată; după mutarea/
+                # clonarea proiectului în alt loc (DB-ul din ~/.jarvis e partajat) rămâneau greșite.
+                db.seteaza_profil(cheie, valoare_implicita)
 
     def get(self, cheie: str, default: str = "") -> str:
         """Returnează valoarea unei chei din profil."""

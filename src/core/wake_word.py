@@ -104,6 +104,7 @@ def porneste_cu_wake_word(
     istoric: list | None = None,
     rotatie_clienti=None,
     model_gemini: str = "gemini-3.6-flash",
+    sesiune_id: str | None = None,
 ) -> None:
     """
     Buclă permanentă: ascultă pasiv → detectează → conversație → repeat.
@@ -156,6 +157,7 @@ def porneste_cu_wake_word(
                 istoric=istoric,
                 rotatie_clienti=rotatie_clienti,
                 model=model_gemini,
+                sesiune_id=sesiune_id,
             )
 
             print("\n[Revin la ascultarea pasivă...]\n")

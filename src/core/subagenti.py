@@ -53,7 +53,9 @@ _ERORI_FALLBACK = (403, 429, 500, 502, 503, 504)
 _MARCAJE_TEMPORARE = ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "OVERLOADED", "DEADLINE_EXCEEDED")
 try:
     import httpx
-    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)
+    # FIX: aliniat cu main.py — înainte lipseau ReadError, WriteTimeout, PoolTimeout, deci o cădere
+    # de rețea de acest tip întorcea „Eroare în sub-agent" în loc să încerce cheia următoare.
+    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)
 except ImportError:
     _EXCEPTII_RETEA = ()
 

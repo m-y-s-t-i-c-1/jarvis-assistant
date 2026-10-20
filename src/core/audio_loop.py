@@ -46,7 +46,12 @@ from src.core.tts import spune
 from src.core.barge_in import vorbeste_cu_intrerupere
 from src.core.agent import agent_loop_streaming, _PATTERN_SFARSIT_PROPOZITIE
 from src.core.router import clasifica, este_raspuns_scurt_de_continuare
-from src.core.stare_conversatie import conversatie_activa
+from src.core.stare_conversatie import conversatie_activa, lock_istoric
+from src.core.context_manager import proceseaza as proceseaza_context, MAX_MESAJE_CONTEXT
+from src.core.persistenta_tura import salveaza_tura
+from src.core.context_rag import prompt_pentru_tura
+from src.core.confirmare_vocala import cere_confirmare_vocala
+from src.core.security import canal_confirmare
 from src.core.llm_provider import (
     intreaba_nvidia_cod,
     intreaba_nvidia_conversatie,
@@ -163,6 +168,63 @@ def porneste_bucla_audio(
     istoric: list | None = None,
     rotatie_clienti=None,
     model: str = "gemini-3.6-flash",  # FIX: era 2.5-flash; restul proiectului folosește 3.6-flash
+    sesiune_id: str | None = None,
+) -> None:
+    """
+    Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
+
+    Parametri:
+        istoric:          lista de mesaje existentă (din main.py), sau None
+                          pentru o conversație nouă independentă.
+        rotatie_clienti:  iteratorul de clienți Gemini din main.py (opțional,
+                          dacă None construim unul nou din .env).
+        model:            modelul Gemini de folosit.
+        sesiune_id:       sesiunea DB în care se salvează turele (opțional; dacă lipsește,
+                          se creează una proprie și se închide la final).
+
+    FIX: modul vocal nu salva nimic în DB/RAG/memorie, nu limita istoricul (creștea nelimitat)
+    și folosea un system prompt fără profil/amintiri. Acum face toate cele trei.
+    """
+    if istoric is None:
+        istoric = []
+    if rotatie_clienti is None:
+        rotatie_clienti = _obtine_client_gemini()
+
+    sesiune_proprie = False
+    try:
+        from src.core.database import db
+        if sesiune_id is None:
+            sesiune_id = db.incepe_sesiune()
+            sesiune_proprie = True
+    except Exception as e:
+        print(f"[Voce] Nu pot folosi DB-ul pentru sesiune: {e}")
+        sesiune_id = None
+
+    try:
+        from src.core.memory import memorie
+        system_prompt = memorie.construieste_system_prompt(SYSTEM_PROMPT)
+    except Exception as e:
+        print(f"[Voce] Nu am putut adăuga profilul/amintirile în prompt: {e}")
+        system_prompt = SYSTEM_PROMPT
+
+    try:
+        # Confirmările de securitate se dau vocal, nu prin input() în terminal.
+        with canal_confirmare(cere_confirmare_vocala):
+            _porneste_bucla_audio_interna(istoric, rotatie_clienti, model, sesiune_id, system_prompt)
+    finally:
+        if sesiune_proprie:
+            try:
+                db.inchide_sesiune(sesiune_id)
+            except Exception as e:
+                print(f"[DB] Nu am putut închide sesiunea vocală: {e}")
+
+
+def _porneste_bucla_audio_interna(
+    istoric: list,
+    rotatie_clienti,
+    model: str,
+    sesiune_id,
+    system_prompt: str,
 ) -> None:
     """
     Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
@@ -224,114 +286,138 @@ def porneste_bucla_audio(
             break
 
         # ── Pasul 3+4: Router → Agent (Gemini sau NVIDIA) + TTS pe măsură ──
-        print(INDICATOR["gandesc"])
-        lungime_inainte = len(istoric)
-        istoric.append(
-            types.Content(
-                role="user",
-                parts=[types.Part(text=text_utilizator)]
-            )
-        )
-
-        print(INDICATOR["vorbesc"])
-        flag_intrerupere = threading.Event()
-
-        def _la_propozitie(propozitie: str):
-            """
-            Vorbește o propoziție IMEDIAT prin vorbeste_cu_intrerupere
-            (Task 6.10 — ascultă concurent pentru barge-in). Dacă Vasea
-            vorbește peste Jarvis, setăm flag_intrerupere.
-            """
-            print(f"Jarvis: {propozitie}")
-
-            a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
-            if a_fost_intrerupt:
-                flag_intrerupere.set()
-
-        # Clasificăm cererea — la fel ca în modul text (main.py), ca să nu
-        # trimitem TOTUL pe Gemini și să epuizăm cota gratuită (429
-        # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
-        # de nicio unealtă reală.
-        global _ultima_categorie_vocal
-        if este_raspuns_scurt_de_continuare(text_utilizator):
-            categorie = _ultima_categorie_vocal
-            print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
-        else:
-            categorie = clasifica(text_utilizator)
-            print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
-        _ultima_categorie_vocal = categorie
-
-        eroare_de_afisat = None
-
-        # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
-        # ture (toate propozițiile răspunsului, nu doar una), ca alertele
-        # de ecran (main.py, _la_schimbare_ecran) să nu se strecoare între
-        # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
-        conversatie_activa.set()
-        try:
-            if categorie == "unelte":
-                # Singura cale cu tool-calling real — Gemini, streaming nativ.
+        # FIX: tura sub lock — același `istoric` e folosit de bucla text (main.py).
+        with lock_istoric:
+            print(INDICATOR["gandesc"])
+            # FIX: istoricul vocal nu era niciodată limitat (creștea la nesfârșit, cost + risc de 400).
+            if len(istoric) > MAX_MESAJE_CONTEXT:
                 try:
-                    client_curent = next(rotatie_clienti)
-                    agent_loop_streaming(
-                        client_curent, model, SYSTEM_PROMPT, istoric,
-                        la_propozitie_gata=_la_propozitie,
-                        flag_intrerupere=flag_intrerupere,
-                    )
+                    proceseaza_context(istoric, sesiune_id or "voce",
+                                       client=next(rotatie_clienti), model=model)
                 except Exception as e:
-                    eroare_de_afisat = e
-            else:
-                # "cod" / "conversatie" — NVIDIA întâi, FĂRĂ unelte reale.
-                mesaje_openai = istoric_la_mesaje_openai(
-                    istoric, _AVERTISMENT_NVIDIA_VOCAL + "\n\n" + SYSTEM_PROMPT
+                    print(f"[Context] Rezumarea istoricului vocal a eșuat: {e}")
+            lungime_inainte = len(istoric)
+            istoric.append(
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=text_utilizator)]
                 )
-                rezultat = (
-                    intreaba_nvidia_cod(mesaje_openai)
-                    if categorie == "cod"
-                    else intreaba_nvidia_conversatie(mesaje_openai)
-                )
+            )
 
-                if rezultat:
-                    istoric.append(
-                        types.Content(role="model", parts=[types.Part(text=rezultat)])
-                    )
-                    _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
-                else:
-                    # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
-                    print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
-                    _ultima_categorie_vocal = "unelte"
+            print(INDICATOR["vorbesc"])
+            flag_intrerupere = threading.Event()
+
+            def _la_propozitie(propozitie: str):
+                """
+                Vorbește o propoziție IMEDIAT prin vorbeste_cu_intrerupere
+                (Task 6.10 — ascultă concurent pentru barge-in). Dacă Vasea
+                vorbește peste Jarvis, setăm flag_intrerupere.
+                """
+                print(f"Jarvis: {propozitie}")
+
+                a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
+                if a_fost_intrerupt:
+                    flag_intrerupere.set()
+
+            # Clasificăm cererea — la fel ca în modul text (main.py), ca să nu
+            # trimitem TOTUL pe Gemini și să epuizăm cota gratuită (429
+            # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
+            # de nicio unealtă reală.
+            global _ultima_categorie_vocal
+            if este_raspuns_scurt_de_continuare(text_utilizator):
+                categorie = _ultima_categorie_vocal
+                print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
+            else:
+                categorie = clasifica(text_utilizator)
+                print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
+            _ultima_categorie_vocal = categorie
+
+            eroare_de_afisat = None
+            raspuns_final = ""
+            # Profil + amintiri proaspete + context RAG, calculat pentru tura curentă.
+            prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT, system_prompt, text_utilizator, sesiune_id)
+
+            # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
+            # ture (toate propozițiile răspunsului, nu doar una), ca alertele
+            # de ecran (main.py, _la_schimbare_ecran) să nu se strecoare între
+            # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
+            conversatie_activa.set()
+            try:
+                if categorie == "unelte":
+                    # Singura cale cu tool-calling real — Gemini, streaming nativ.
                     try:
                         client_curent = next(rotatie_clienti)
-                        agent_loop_streaming(
-                            client_curent, model, SYSTEM_PROMPT, istoric,
+                        raspuns_final = agent_loop_streaming(
+                            client_curent, model, prompt_tura, istoric,
                             la_propozitie_gata=_la_propozitie,
                             flag_intrerupere=flag_intrerupere,
                         )
                     except Exception as e:
                         eroare_de_afisat = e
+                else:
+                    # "cod" / "conversatie" — NVIDIA întâi, FĂRĂ unelte reale.
+                    mesaje_openai = istoric_la_mesaje_openai(
+                        istoric, _AVERTISMENT_NVIDIA_VOCAL + "\n\n" + prompt_tura
+                    )
+                    rezultat = (
+                        intreaba_nvidia_cod(mesaje_openai)
+                        if categorie == "cod"
+                        else intreaba_nvidia_conversatie(mesaje_openai)
+                    )
 
-            if eroare_de_afisat is not None:
-                e = eroare_de_afisat
-                raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
-                print(f"[EROARE agent]: {e}")
-                # FIX: print_exc() în afara blocului except afișa doar
-                # "NoneType: None" — excepția era deja ieșită din scope.
-                traceback.print_exception(type(e), e, e.__traceback__)
-                # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
-                # ca să nu rămână "user" consecutiv în istoric.
-                # FIX: ștergem necondiționat — dacă ultimul element era un
-                # turn "model" cu function_call fără răspuns, vechea condiție
-                # (role == "user") lăsa istoricul corupt pentru totdeauna.
-                del istoric[lungime_inainte:]
-                try:
-                    spune(raspuns_text)
-                except Exception as e_tts:
-                    print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
-        finally:
-            # Garantăm eliberarea flag-ului indiferent de rezultat — altfel
-            # o eroare neprevăzută ar lăsa alertele de ecran blocate la
-            # coadă pentru totdeauna, crezând că o conversație e încă activă.
-            conversatie_activa.clear()
+                    if rezultat:
+                        raspuns_final = rezultat
+                        istoric.append(
+                            types.Content(role="model", parts=[types.Part(text=rezultat)])
+                        )
+                        _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
+                    else:
+                        # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
+                        print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
+                        _ultima_categorie_vocal = "unelte"
+                        try:
+                            client_curent = next(rotatie_clienti)
+                            raspuns_final = agent_loop_streaming(
+                                client_curent, model, prompt_tura, istoric,
+                                la_propozitie_gata=_la_propozitie,
+                                flag_intrerupere=flag_intrerupere,
+                            )
+                        except Exception as e:
+                            eroare_de_afisat = e
+
+                if eroare_de_afisat is not None:
+                    e = eroare_de_afisat
+                    raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
+                    print(f"[EROARE agent]: {e}")
+                    # FIX: print_exc() în afara blocului except afișa doar
+                    # "NoneType: None" — excepția era deja ieșită din scope.
+                    traceback.print_exception(type(e), e, e.__traceback__)
+                    # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
+                    # ca să nu rămână "user" consecutiv în istoric.
+                    # FIX: ștergem necondiționat — dacă ultimul element era un
+                    # turn "model" cu function_call fără răspuns, vechea condiție
+                    # (role == "user") lăsa istoricul corupt pentru totdeauna.
+                    del istoric[lungime_inainte:]
+                    try:
+                        spune(raspuns_text)
+                    except Exception as e_tts:
+                        print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
+            finally:
+                # Garantăm eliberarea flag-ului indiferent de rezultat — altfel
+                # o eroare neprevăzută ar lăsa alertele de ecran blocate la
+                # coadă pentru totdeauna, crezând că o conversație e încă activă.
+                conversatie_activa.clear()
+
+        # FIX: salvăm tura vocală (DB + RAG + amintiri), pe thread separat ca să nu întârziem ascultarea.
+        # Salvăm doar dacă tura s-a încheiat cu un răspuns real al modelului în istoric: agent_loop_streaming
+        # întoarce și mesaje de avarie (fără răspuns valid / buclă prea lungă) care NU sunt în istoric.
+        a_raspuns_real = bool(istoric) and istoric[-1].role == "model"
+        if sesiune_id and raspuns_final and a_raspuns_real and eroare_de_afisat is None and raspuns_final != "[întrerupt]":
+            threading.Thread(
+                target=salveaza_tura,
+                args=(sesiune_id, text_utilizator, raspuns_final, next(rotatie_clienti), model),
+                daemon=True,
+            ).start()
 
         if flag_intrerupere.is_set():
             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")

@@ -83,7 +83,10 @@ class _PlayerThread:
                         sd.play(audio, samplerate=dev_sr, device=DEVICE_REDARE_DIFUZOARE)
 
                     # Wait in small steps so we can react to stop_ev
-                    while sd.get_stream() is not None and not stop_ev.is_set():
+                    # FIX: sd.get_stream() întoarce mereu ultimul stream (niciodată None),
+                    # deci bucla nu se termina singură la sfârșitul redării; verificăm .active.
+                    stream_curent = sd.get_stream()
+                    while stream_curent.active and not stop_ev.is_set():
                         time.sleep(0.01)
 
                     if stop_ev.is_set():

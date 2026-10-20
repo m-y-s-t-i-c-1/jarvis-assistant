@@ -198,7 +198,11 @@ class ConsolidareMemorie:
                     text = text[4:]
             text = text.strip()
 
-            return json.loads(text)
+            date = json.loads(text)
+            # FIX: modelul putea „șterge" id-uri inventate sau din afara celor 50 trimise în prompt.
+            if isinstance(date, dict):
+                date["_ids_prompt"] = {a["id"] for a in amintiri}
+            return date
 
         except Exception as e:
             print(f"[Consolidare] Eroare AI: {e}")
@@ -278,8 +282,11 @@ class ConsolidareMemorie:
             de_sters = date_ai.get("de_sters") or []
             if not isinstance(de_sters, list):
                 de_sters = []
+            ids_permise = date_ai.get("_ids_prompt")
             for id_sters in de_sters:
                 try:
+                    if ids_permise is not None and int(id_sters) not in ids_permise:
+                        continue
                     self._sterge(int(id_sters))
                     rezultat["amintiri_sterse_ai"] += 1
                 except Exception:

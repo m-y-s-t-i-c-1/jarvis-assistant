@@ -21,6 +21,7 @@ Când implementezi Faza 3, caută comentariul "FAZA 3:" din această clasă
 
 import re
 import sys
+import threading
 from enum import Enum
 from src.core.git_safety import creeaza_checkpoint
 
@@ -32,6 +33,29 @@ class ConfirmationMode(Enum):
 
 CONFIRMATION_MODE = ConfirmationMode.TEXT
 
+# Canal de confirmare PER THREAD: bucla vocală (alt thread decât bucla text) își înregistrează aici
+# confirmarea vorbită, iar bucla text rămâne pe terminal. Uneltele rulează în același thread cu tura
+# care le-a cerut (inclusiv sub-agenții), deci thread-local e suficient.
+_canal = threading.local()
+
+
+class canal_confirmare:
+    """Context manager: `with canal_confirmare(fn): ...` — în blocul respectiv, cere_confirmare
+    apelează fn(nume_functie, argumente) -> bool în locul input()."""
+
+    def __init__(self, functie):
+        self._functie = functie
+        self._anterior = None
+
+    def __enter__(self):
+        self._anterior = getattr(_canal, "functie", None)
+        _canal.functie = self._functie
+        return self
+
+    def __exit__(self, *exc):
+        _canal.functie = self._anterior
+        return False
+
 
 # ---- Pattern-uri blocate complet (blacklist) ----
 # Dacă vreun argument al unui apel de funcție conține unul din aceste
@@ -41,7 +65,8 @@ BLACKLIST_PATTERNS = [
     # FIX: pattern-urile nu aveau limite de cuvânt, deci "halt" bloca
     # "asphalt", "rm -f" bloca "confirm -f"/"perform -rf", "exec " bloca
     # "execute"-uri etc. Acum (?<![\w-]) / \b ancorează la cuvânt întreg.
-    r"(?<![\w-])rm\s+-[rRfF]+",     # rm -rf și variante
+    # FIX: `-[rRfF]+` imediat după `rm` lăsa să treacă `rm -vrf`, `rm -v -rf`, `rm -iR`.
+    r"(?<![\w-])rm\s+(?:-\w+\s+)*-\w*[rRfF]\w*",  # rm -rf și variante
     r"(?<![\w-])rm\s+--recursive",  # rm --recursive
     r":\s*\(\s*\)\s*\{.*\}",         # fork bomb
     r"\bmkfs\.",                    # formatare disc
@@ -141,6 +166,16 @@ def cere_confirmare(nume_functie: str, argumente: dict) -> bool:
         f"\n⚠️  Jarvis dorește să execute: {nume_functie}({argumente})\n"
         f"    Această acțiune necesită confirmare. Aprobi? "
     )
+
+    # Canal înregistrat pentru thread-ul curent (ex: bucla vocală) are prioritate.
+    functie_canal = getattr(_canal, "functie", None)
+    if functie_canal is not None:
+        print(mesaj)
+        try:
+            return bool(functie_canal(nume_functie, argumente))
+        except Exception as e:
+            print(f"[Securitate] Canalul de confirmare a eșuat ({e}) — acțiune refuzată.")
+            return False
 
     if CONFIRMATION_MODE == ConfirmationMode.TEXT:
         return _confirmare_text(mesaj)

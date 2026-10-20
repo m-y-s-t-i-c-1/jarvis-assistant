@@ -117,7 +117,12 @@ def evenimente_viitoare(numar: int = 10):
         return _mesaj_lipsa_config()
 
     try:
-        acum = datetime.datetime.utcnow().isoformat() + "Z"
+        # FIX: utcnow() e deprecat; numar poate veni ca float (5.0) -> API-ul respinge maxResults
+        acum = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        try:
+            numar = max(1, min(int(numar), 100))
+        except (TypeError, ValueError):
+            numar = 10
         rezultat = (
             service.events()
             .list(

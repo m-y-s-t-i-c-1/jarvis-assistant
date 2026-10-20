@@ -20,3 +20,9 @@ vorbească, ca să nu se suprapună niciodată peste o tură de conversație.
 import threading
 
 conversatie_activa = threading.Event()
+
+# FIX: `istoric` e o listă partajată între bucla text (main.py) și bucla vocală
+# (audio_loop.py, rulată pe thread separat în modurile [1] și [3]). Fără lock,
+# două ture concurente intercalau mesaje user/function_call/function_response
+# și corupeau istoricul (-> 400 de la Gemini). Fiecare tură ia lock-ul pe toată durata ei.
+lock_istoric = threading.RLock()

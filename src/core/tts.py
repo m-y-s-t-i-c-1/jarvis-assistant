@@ -362,6 +362,7 @@ def _asteapta_fisier_stabil(cale: str, timeout: float) -> bool:
     """
     inceput = time.time()
     dimensiune_anterioara = -1
+    verificari_stabile = 0  # FIX: 2 verificări la 20ms puteau prinde o pauză între scrieri -> WAV trunchiat
 
     while time.time() - inceput < timeout:
         if os.path.exists(cale):
@@ -371,7 +372,11 @@ def _asteapta_fisier_stabil(cale: str, timeout: float) -> bool:
                 dimensiune = -1
 
             if dimensiune > 0 and dimensiune == dimensiune_anterioara:
-                return True
+                verificari_stabile += 1
+                if verificari_stabile >= 3:
+                    return True
+            else:
+                verificari_stabile = 0
             dimensiune_anterioara = dimensiune
 
         time.sleep(_INTERVAL_POLL_FISIER)

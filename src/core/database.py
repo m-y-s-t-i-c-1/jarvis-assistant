@@ -275,6 +275,20 @@ class JarvisDB:
         """
         acum = datetime.now().isoformat()
         with self._conexiune() as con:
+            # FIX: același fapt re-extras la fiecare tură se insera ca rând NOU. Duplicatele umpleau
+            # tabela și, având toate relevanța 1.0, acopereau cele 10 amintiri injectate în prompt.
+            # „Confirmarea" (documentată în consolidare.py) nu era implementată: acum o amintire
+            # identică doar își reîmprospătează `actualizat` și relevanța.
+            existent = con.execute(
+                "SELECT id, relevanta FROM memorie WHERE tip=? AND lower(trim(continut))=lower(trim(?))",
+                (tip, continut),
+            ).fetchone()
+            if existent:
+                con.execute(
+                    "UPDATE memorie SET actualizat=?, relevanta=? WHERE id=?",
+                    (acum, max(float(existent["relevanta"]), float(relevanta)), existent["id"]),
+                )
+                return existent["id"]
             cursor = con.execute(
                 """INSERT INTO memorie (tip, continut, sursa, relevanta, creat_la, actualizat)
                    VALUES (?, ?, ?, ?, ?, ?)""",

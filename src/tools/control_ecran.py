@@ -181,6 +181,10 @@ def apasa_tasta(tasta: str):
         parti = [p.strip() for p in tasta.lower().split("+") if p.strip()]
         if not parti:
             return "Nicio tastă specificată."
+        # FIX: pyautogui ignoră tăcut tastele necunoscute, iar funcția raporta „Tastă apăsată".
+        necunoscute = [p for p in parti if p not in pyautogui.KEYBOARD_KEYS]
+        if necunoscute:
+            return f"Tastă necunoscută: {', '.join(necunoscute)}. Folosește nume pyautogui (ex: 'enter', 'ctrl', 'esc')."
         if len(parti) > 1:
             pyautogui.hotkey(*parti)
         else:

@@ -5,6 +5,7 @@ Expune JobManager din core/jobs.py către Gemini. Util pentru comenzi care
 durează mult — build-uri, download-uri mari, compilări, sincronizări etc.
 """
 
+import shlex
 from src.core.registry import unealta
 from src.core.jobs import manager_joburi
 
@@ -41,7 +42,11 @@ from src.core.jobs import manager_joburi
 )
 def porneste_job_fundal(comanda: str, descriere: str, director: str = "."):
     """Pornește o comandă lungă într-un thread separat și returnează ID-ul jobului."""
-    parti_comanda = comanda.split()
+    # FIX: .split() rupea argumentele cu ghilimele (git commit -m "a b"); shlex le respectă.
+    try:
+        parti_comanda = shlex.split(comanda)
+    except ValueError as e:
+        return f"Comandă invalidă ({e})."
 
     if not parti_comanda:
         return "Comanda e goală, nu am ce rula."

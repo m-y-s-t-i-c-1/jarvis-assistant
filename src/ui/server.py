@@ -79,6 +79,10 @@ SYSTEM_PROMPT = memorie.construieste_system_prompt(SYSTEM_PROMPT_BAZA)
 
 conexiuni_active: list[WebSocket] = []
 
+# FIX: sesiunea creată la import nu se marca niciodată închisă (main.py o face).
+import atexit
+atexit.register(lambda: db.inchide_sesiune(sesiune_id))
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Jarvis UI")
@@ -97,9 +101,22 @@ async def broadcast(mesaj: dict):
             conexiuni_active.remove(ws)
 
 
-def _e_eroare_de_fallback(mesaj_err: str) -> bool:
+def _e_eroare_de_fallback(eroare) -> bool:
     # FIX: înainte `str(c) in mesaj_err` potrivea "500" oriunde în text
     # (ex: "8500 tokens"). Acum doar cod de sine stătător.
+    # FIX 2: acceptă și excepția în sine — erorile de rețea (httpx) și atributul .code nu
+    # aveau cod în text, deci UI-ul nu încerca cheia următoare (spre deosebire de main.py).
+    try:
+        import httpx
+        if isinstance(eroare, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)):
+            return True
+    except ImportError:
+        pass
+    for atribut in ("code", "status_code"):
+        cod = getattr(eroare, atribut, None)
+        if isinstance(cod, int) and cod in ERORI_FALLBACK:
+            return True
+    mesaj_err = str(eroare)
     return any(re.search(rf"(?<!\d){c}(?!\d)", mesaj_err) for c in ERORI_FALLBACK)
 
 
@@ -137,7 +154,7 @@ def _ruleaza_agent_blocat(mesaj_user: str) -> str:
             try:
                 raspuns = agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
             except Exception as e:
-                if _e_eroare_de_fallback(str(e)):
+                if _e_eroare_de_fallback(e):
                     time.sleep(0.5)
                     continue
                 raise
@@ -232,7 +249,13 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         while True:
             data    = await ws.receive_text()
-            payload = json.loads(data)
+            # FIX: un mesaj JSON invalid (sau non-obiect) arunca excepție -> conexiunea cădea.
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
             tip     = payload.get("tip", "")
 
             if tip == "ping":
@@ -246,7 +269,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 await broadcast({"tip": "status", "stare": "thinking"})
 
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
                 try:
                     raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
                 except Exception as e:
@@ -255,10 +278,18 @@ async def websocket_endpoint(ws: WebSocket):
                     await broadcast({"tip": "status", "stare": "idle"})
                     continue
 
-                db.salveaza_mesaj(sesiune_id, "user", text_user)
-                db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
-                rag.indexeaza_mesaj("user", text_user, sesiune_id)
-                rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+                # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
+                # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
+                def _persista():
+                    db.salveaza_mesaj(sesiune_id, "user", text_user)
+                    db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+                    rag.indexeaza_mesaj("user", text_user, sesiune_id)
+                    rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+
+                try:
+                    await loop.run_in_executor(None, _persista)
+                except Exception as e:
+                    print(f"[Memorie] Salvare/indexare eșuată: {e}")
 
                 await broadcast({
                     "tip":    "raspuns",

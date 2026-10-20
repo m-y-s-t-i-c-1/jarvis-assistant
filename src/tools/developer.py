@@ -47,11 +47,14 @@ _server_proc: "subprocess.Popen | None" = None  # păstrat ca să putem face pol
 )
 def deschide_vscode(cale: str = "."):
     """Deschide VS Code la calea specificată."""
-    cale = cale.strip() or "."
+    cale = (cale or "").strip() or "."
+    # FIX: o cale care începe cu '-' ar fi interpretată de `code` ca opțiune (--install-extension etc.)
+    if cale.startswith("-"):
+        return f"Cale invalidă: '{cale}' nu poate începe cu '-'."
 
     try:
         subprocess.Popen(
-            ["code", cale],
+            ["code", "--", cale],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -125,7 +128,9 @@ def porneste_server_http(port: int = 8000, folder: str = "."):
         # FIX: "python" nu există pe multe sisteme (doar "python3");
         # sys.executable e interpretorul care rulează deja Jarvis.
         proces = subprocess.Popen(
-            [sys.executable, "-m", "http.server", str(port), "--directory", folder],
+            # FIX: fără --bind, http.server ascultă pe TOATE interfețele (0.0.0.0): folderul
+            # (implicit chiar rădăcina proiectului, cu .env) devenea vizibil oricui din rețeaua locală.
+            [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1", "--directory", folder],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -168,6 +173,7 @@ def opreste_server_http():
                 _server_proc.wait(timeout=3)   # recoltăm procesul, fără zombie
             except subprocess.TimeoutExpired:
                 _server_proc.kill()
+                _server_proc.wait(timeout=3)  # FIX: fără wait() rămânea proces zombie
         elif _server_proc is None:
             os.kill(_server_pid, signal.SIGTERM)
         _server_pid = None
@@ -276,6 +282,11 @@ def git_status(cale_repo: str = "."):
     max_linii=40,
 )
 def git_log(numar: int = 10, cale_repo: str = "."):
+    # FIX: Gemini poate trimite 5.0 -> `--max-count=5.0` e respins de git
+    try:
+        numar = max(1, min(int(numar), 200))
+    except (TypeError, ValueError):
+        numar = 10
     return _ruleaza_git(
         ["log", f"--max-count={numar}", "--oneline", "--decorate"],
         cale_repo

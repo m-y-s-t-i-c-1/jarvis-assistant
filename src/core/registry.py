@@ -194,6 +194,23 @@ def get_unelte_pentru_gemini(doar_functiile: list[str] | None = None) -> list[ty
     return [types.Tool(function_declarations=declaratii)]
 
 
+def _normalizeaza_argumente(nume_functie: str, argumente: dict) -> dict:
+    """
+    FIX: Gemini poate trimite parametrii INTEGER ca float (8000.0, 5.0). Autorul tratase asta doar
+    în porneste_server_http; unelte ca git_log, evenimente_viitoare, deruleaza etc. primeau float.
+    Convertim centralizat, după tipul declarat în schemă.
+    """
+    declaratie = DECLARATII_FUNCTII.get(nume_functie)
+    proprietati = getattr(getattr(declaratie, "parameters", None), "properties", None) or {}
+    rezultat = dict(argumente or {})
+    for nume, valoare in rezultat.items():
+        schema = proprietati.get(nume)
+        tip = getattr(getattr(schema, "type", None), "value", getattr(schema, "type", None))
+        if str(tip).upper() == "INTEGER" and isinstance(valoare, float) and valoare.is_integer():
+            rezultat[nume] = int(valoare)
+    return rezultat
+
+
 def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
     """
     Rulează o funcție din registru în siguranță, cu truncare automată
@@ -204,6 +221,7 @@ def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
 
     try:
         functie = REGISTRU_FUNCTII[nume_functie]
+        argumente = _normalizeaza_argumente(nume_functie, argumente)
         rezultat = functie(**argumente) if argumente else functie()
 
         # Truncăm outputul dacă unealta are max_linii setat

@@ -275,7 +275,9 @@ def comuta_mute(activeaza_mute: str):
 )
 def seteaza_luminozitate(procent: int):
     """Setează luminozitatea ecranului prin brightnessctl."""
-    procent = max(0, min(100, int(procent)))  # clamp în interval valid
+    # FIX: 0% stinge complet iluminarea ecranului pe multe laptopuri (ecran negru, greu de
+    # revenit doar cu vocea). Minimul real e 1%.
+    procent = max(1, min(100, int(procent)))
 
     try:
         subprocess.run(

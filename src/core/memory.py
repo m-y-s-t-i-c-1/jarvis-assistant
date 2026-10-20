@@ -140,6 +140,12 @@ class ManagerMemorie:
             print(f"[Memorie] Eroare la extragere: {e}")
             return 0
 
+        # FIX: modelul poate întoarce o listă sau valori non-string; `.get`/`.strip()` ar fi crăpat
+        # thread-ul de fundal cu un traceback.
+        if not isinstance(date, dict):
+            print("[Memorie] Răspuns de extragere neașteptat (nu e obiect JSON) — ignorat.")
+            return 0
+
         salvate = 0
         tip_map = {
             "fapte":               "fapt",
@@ -153,10 +159,13 @@ class ManagerMemorie:
 
         for cheie, tip in tip_map.items():
             prag = PRAG_LUNGIME.get(tip, 10)
-            for item in date.get(cheie, []):
+            valori = date.get(cheie) or []
+            if not isinstance(valori, list):
+                continue
+            for item in valori:
                 # Filtrare selectivă: sub prag = ignorat, chiar dacă Gemini
                 # l-a extras — categoriile "grele" cer substanță reală.
-                if item and len(item.strip()) > prag:
+                if isinstance(item, str) and len(item.strip()) > prag:
                     # Categoriile noi (mare valoare) pornesc cu relevanță
                     # maximă, ca să nu fie degradate/șterse prematur de
                     # consolidare.py față de fapte/preferințe obișnuite.

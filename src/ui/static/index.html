@@ -650,6 +650,7 @@ function connect() {
   };
 
   ws.onclose = () => {
+    removeThinking();
     setState('offline');
     document.getElementById('conn-dot').style.background = 'var(--red)';
     document.getElementById('conn-dot').style.boxShadow = '0 0 10px var(--red)';
@@ -658,6 +659,17 @@ function connect() {
   };
 
   ws.onerror = () => ws.close();
+}
+
+// FIX: marked/DOMPurify vin de pe CDN; offline (sau CDN blocat) addJarvis() arunca ReferenceError,
+// răspunsul nu se afișa și butonul rămânea blocat pe „thinking". Fallback: text simplu, escapat.
+function randeazaMarkdown(text) {
+  try {
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+      return DOMPurify.sanitize(marked.parse(text));
+    }
+  } catch (e) {}
+  return esc(String(text)).replace(/\n/g, '<br>');
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────
@@ -679,7 +691,7 @@ function addJarvis(text) {
   removeWelcome();
   const wrap = document.createElement('div');
   wrap.className = 'msg-wrap jarvis';
-  wrap.innerHTML = `<div class="msg-label">JARVIS</div><div class="msg-bubble">${DOMPurify.sanitize(marked.parse(text))}</div>`;
+  wrap.innerHTML = `<div class="msg-label">JARVIS</div><div class="msg-bubble">${randeazaMarkdown(text)}</div>`;
   document.getElementById('messages').appendChild(wrap);
   scrollBottom();
 }
@@ -710,7 +722,8 @@ function esc(t) {
 function trimite() {
   const inp = document.getElementById('chat-input');
   const txt = inp.value.trim();
-  if (!txt || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!txt) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) { log('Nu sunt conectat la Jarvis — mesajul nu a fost trimis.', 'warn'); return; }
   addUser(txt);
   showThinking();
   setState('thinking');
@@ -733,7 +746,7 @@ function log(msg, type='info') {
   const t = new Date().toLocaleTimeString('ro',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
   const d = document.createElement('div');
   d.className = 'log-item';
-  d.innerHTML = `<span class="log-time">${t}</span><span class="log-msg-${type}">${msg}</span>`;
+  d.innerHTML = `<span class="log-time">${t}</span><span class="log-msg-${type}">${esc(String(msg))}</span>`;
   el.insertBefore(d, el.firstChild);
   if (el.children.length > 40) el.lastChild.remove();
 }

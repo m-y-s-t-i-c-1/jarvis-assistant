@@ -419,11 +419,23 @@ function connect() {
     }
   };
   ws.onclose = () => {
+    removeThinking();
     wSetState('offline');
     document.getElementById('w-conn').style.background = 'var(--red)';
     retry = setTimeout(connect, 3000);
   };
   ws.onerror = () => ws.close();
+}
+
+// FIX: marked/DOMPurify vin de pe CDN; offline (sau CDN blocat) addJarvis() arunca ReferenceError,
+// răspunsul nu se afișa și butonul rămânea blocat pe „thinking". Fallback: text simplu, escapat.
+function randeazaMarkdown(text) {
+  try {
+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+      return DOMPurify.sanitize(marked.parse(text));
+    }
+  } catch (e) {}
+  return esc(String(text)).replace(/\n/g, '<br>');
 }
 
 // ── Chat ───────────────────────────────────────────────────────────────────
@@ -444,7 +456,7 @@ function addJarvis(text) {
   if (w) w.remove();
   const d = document.createElement('div');
   d.className = 'w-msg jarvis';
-  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${DOMPurify.sanitize(marked.parse(text))}</div>`;
+  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${randeazaMarkdown(text)}</div>`;
   document.getElementById('w-messages').appendChild(d);
   scroll();
 }

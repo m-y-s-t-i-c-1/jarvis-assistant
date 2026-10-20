@@ -313,7 +313,10 @@ def _uneste_parti_stream(parti: list):
             and not getattr(unite[-1], "function_call", None)
             and not getattr(unite[-1], "thought", None)
         ):
-            unite[-1] = types.Part(text=unite[-1].text + parte.text)
+            # FIX: types.Part(text=...) pierdea thought_signature (Gemini 3) — îl păstrăm
+            # pe cel mai recent întâlnit.
+            semnatura = getattr(parte, "thought_signature", None) or getattr(unite[-1], "thought_signature", None)
+            unite[-1] = types.Part(text=unite[-1].text + parte.text, thought_signature=semnatura)
         else:
             unite.append(parte)
     return types.Content(role="model", parts=unite)

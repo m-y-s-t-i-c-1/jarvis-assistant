@@ -57,6 +57,15 @@ def _asculta_pentru_intrerupere(stop_flag: threading.Event, a_intrerupt: threadi
     detector = obtine_detector()
     blocuri_consecutive = 0
 
+    # FIX: Silero e stateful; starea rămasă de la enunțul/propoziția anterioară
+    # putea declanșa sau întârzia detecția. Bucla VAD principală nu rulează în
+    # timpul TTS, deci resetarea (sub lock) e sigură aici.
+    try:
+        with detector._lock_model:
+            detector.model.reset_states()
+    except Exception:
+        pass
+
     try:
         # Determinăm rata nativă ȘI numărul real de canale ale device-ului
         # de captură (echo-cancel-source e STEREO — 2 canale — pe sistemul
