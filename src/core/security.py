@@ -57,6 +57,16 @@ class canal_confirmare:
         return False
 
 
+# Oprire/restart sistem. Definit separat, ca să poată fi tratat diferit pentru
+# unelte care primesc text liber (scrie_text) — vezi verifica_blacklist.
+_PATTERN_OPRIRE = r"\b(shutdown|reboot|halt|poweroff)\b"
+# Varianta "ca și comandă": la început de text / după ; & | newline, opțional cu sudo,
+# sau prin systemctl. Nu prinde propoziții ca „trebuie să dau reboot la router".
+_PATTERN_OPRIRE_CA_COMANDA = (
+    r"(?:^|[;&|\n]\s*)(?:sudo\s+)?(?:shutdown|reboot|halt|poweroff)\b"
+    r"|\bsystemctl\s+(?:\w+\s+)*(?:reboot|poweroff|halt|suspend|hibernate)\b"
+)
+
 # ---- Pattern-uri blocate complet (blacklist) ----
 # Dacă vreun argument al unui apel de funcție conține unul din aceste
 # pattern-uri, execuția e oprită imediat, fără confirmare, fără excepții.
@@ -75,7 +85,7 @@ BLACKLIST_PATTERNS = [
     r"\bchmod\s+-R\s+777",          # permisiuni globale nesigure
     r"\bchown\s+-R.*root",          # schimbare owner la root recursiv
     r"\bsudo\s+rm\b",              # rm cu sudo
-    r"\b(shutdown|reboot|halt|poweroff)\b",  # oprire/restart sistem
+    _PATTERN_OPRIRE,  # oprire/restart sistem
     r"(?:^|[;&|]\s*)(?:sudo\s+)?passwd\b",  # comanda passwd (nu orice text cu "passwd")
     r"\b(useradd|userdel|usermod)\b",  # modificare utilizatori sistem
     r"\b(visudo|sudoers)\b",        # modificare privilegii sudo
@@ -85,7 +95,9 @@ BLACKLIST_PATTERNS = [
     r"\bwget\b.+\|\s*(bash|sh)\b",  # pipe wget direct în shell
     r"(?:^|[;&|]\s*)(?:eval|exec)\s+",   # eval/exec ca și comandă shell
     r"\bbase64\s+(--decode|-d).*\|",  # decode base64 și pipe (ofuscare)
-    r"\bpython[\d.]*\s.*-c\s+['\"]", # python -c "cod arbitrar"
+    # FIX: `.*-c` bloca și `python build.py -c 'cfg'` (-c e flag-ul scriptului).
+    # Acum doar `-c` care aparține interpretorului (imediat după python + opțiuni).
+    r"\bpython[\d.]*\s+(?:-[\w.]+\s+)*-\w*c\s+['\"]", # python -c "cod arbitrar"
     # FIX: înainte `\bsubprocess\b` bloca orice text cu cuvântul "subprocess";
     # acum doar apelurile efective.
     r"\bos\.system\s*\(|\bsubprocess\.(run|call|Popen|check_output|check_call)\b",
@@ -100,6 +112,7 @@ BLACKLIST_PATTERNS = [
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel
 _BLACKLIST_COMPILED = [re.compile(p, re.IGNORECASE) for p in BLACKLIST_PATTERNS]
+_OPRIRE_CA_COMANDA_COMPILAT = re.compile(_PATTERN_OPRIRE_CA_COMANDA, re.IGNORECASE)
 
 # ---- Unelte pentru care Git Safety Net-ul NU are sens ----
 # Checkpoint-ul Git protejează fișierele din repo — n-are rost să facem
@@ -128,7 +141,14 @@ _PARAMETRI_TEXT_LIBER = {
     "deleaga_agent_devops": {"sarcina"},
     "deleaga_agent_cercetare": {"sarcina"},
     "gaseste_pe_ecran": {"element"}, "vezi_ecranul": {"intrebare"},
+    # FIX: calea e pasată lui `code` ca argument (cu `--`), nu interpretată de shell:
+    # „halt.py" nu trebuie blocat ca „halt".
+    "deschide_vscode": {"cale"},
 }
+
+# Unelte care tastează text liber: oprirea sistemului se blochează doar când textul
+# arată a COMANDĂ (restul pattern-urilor rămân active — tastarea într-un terminal e vector de atac).
+_UNELTE_TEXT_TASTAT = {"scrie_text"}
 
 
 def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
@@ -145,6 +165,8 @@ def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
     )
 
     for pattern in _BLACKLIST_COMPILED:
+        if nume_functie in _UNELTE_TEXT_TASTAT and pattern.pattern == _PATTERN_OPRIRE:
+            pattern = _OPRIRE_CA_COMANDA_COMPILAT
         if pattern.search(text_de_verificat):
             return False, (
                 f"Apelul funcției '{nume_functie}' cu argumentele "
@@ -244,6 +266,9 @@ def trece_prin_securitate(
         # Pasul 3: Git Safety Net — checkpoint automat, silențios, doar
         # pentru acțiuni unde chiar are sens (nu ating repo-ul altfel)
         if nume_functie not in _FUNCTII_FARA_SAFETY_NET:
-            creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})")
+            # FIX: checkpoint-ul se făcea mereu în directorul curent, nu în repo-ul
+            # pe care operează unealta (parametrul `cale_repo`).
+            cale_repo = argumente.get("cale_repo") or "."
+            creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})", cale_repo=str(cale_repo))
 
     return True, ""

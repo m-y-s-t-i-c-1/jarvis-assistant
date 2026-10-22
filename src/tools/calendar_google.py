@@ -19,6 +19,7 @@ import datetime
 from src.core.registry import unealta
 
 try:
+    from google.auth.exceptions import RefreshError
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -36,8 +37,21 @@ _SCOPES = ["https://www.googleapis.com/auth/calendar"]
 _CALE_CREDENTIALS = "credentials.json"
 _CALE_TOKEN = "token.json"
 
+# FIX: fusul orar era hardcodat. Configurabil din .env (JARVIS_TIMEZONE), default Chișinău.
+_FUS_ORAR = os.getenv("JARVIS_TIMEZONE", "Europe/Chisinau")
+
 # Serviciul Google Calendar e construit lazy, o singură dată, la prima utilizare
 _service = None
+
+
+def _poate_autentifica_interactiv() -> bool:
+    """True doar dacă avem terminal interactiv și (pe Linux) un display pentru browser."""
+    import sys
+    if not sys.stdin or not sys.stdin.isatty():
+        return False
+    if sys.platform.startswith("linux") and not (os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY")):
+        return False
+    return True
 
 
 def _obtine_service():
@@ -57,17 +71,48 @@ def _obtine_service():
     creds = None
 
     if os.path.exists(_CALE_TOKEN):
-        creds = Credentials.from_authorized_user_file(_CALE_TOKEN, _SCOPES)
+        try:
+            creds = Credentials.from_authorized_user_file(_CALE_TOKEN, _SCOPES)
+        except Exception as e:
+            # token.json corupt / de la alt scope -> îl tratăm ca lipsă și refacem autentificarea
+            print(f"[Calendar] token.json invalid ({e}) — refac autentificarea.")
+            creds = None
 
     if not creds or not creds.valid:
+        reimprospatat = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            # FIX: un refresh eșuat (token revocat / expirat — la proiectele OAuth în
+            # modul „Testing" refresh_token-ul expiră după 7 zile) strica unealta
+            # permanent, până ștergeai token.json manual.
+            try:
+                creds.refresh(Request())
+                reimprospatat = True
+            except RefreshError as e:
+                print(f"[Calendar] Refresh-ul token-ului a eșuat ({e}) — șterg token.json și refac autentificarea.")
+                try:
+                    os.remove(_CALE_TOKEN)
+                except OSError:
+                    pass
+                creds = None
+            except Exception as e:
+                # eroare de rețea etc.: nu ștergem token-ul, doar renunțăm acum
+                print(f"[Calendar] Nu am putut reîmprospăta token-ul: {e}")
+                return None
+
+        if not reimprospatat:
             if not os.path.exists(_CALE_CREDENTIALS):
                 return None  # nu putem autentifica fără credentials.json
 
+            # FIX: run_local_server() deschide un browser și așteaptă la nesfârșit. Din
+            # server/widget sau fără display, ar bloca tura. Permitem autentificarea
+            # interactivă doar din terminal cu display.
+            if not _poate_autentifica_interactiv():
+                print("[Calendar] Token invalid și nu pot deschide browser-ul de aici. "
+                      "Rulează o dată `python -m src.tools.calendar_google` dintr-un terminal.")
+                return None
+
             flow = InstalledAppFlow.from_client_secrets_file(_CALE_CREDENTIALS, _SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=0, timeout_seconds=120)
 
         # Salvăm token-ul (nou sau reîmprospătat) pentru rulările viitoare
         with open(_CALE_TOKEN, "w") as f:
@@ -78,6 +123,11 @@ def _obtine_service():
 
 
 def _mesaj_lipsa_config() -> str:
+    if _GOOGLE_LIBS_DISPONIBILE and os.path.exists(_CALE_CREDENTIALS):
+        return (
+            "Nu mă pot autentifica la Google Calendar (token expirat sau revocat). "
+            "Rulează `python -m src.tools.calendar_google` dintr-un terminal ca să te reautentifici."
+        )
     if not _GOOGLE_LIBS_DISPONIBILE:
         return (
             "Librăriile Google Calendar nu sunt instalate. Rulează: "
@@ -106,11 +156,19 @@ def _mesaj_lipsa_config() -> str:
             "type": "INTEGER",
             "description": "Câte evenimente viitoare să returneze. Default: 10.",
             "optional": True,
-        }
+        },
+        "zi": {
+            "type": "STRING",
+            "description": (
+                "Opțional: 'azi', 'maine' sau o dată ISO (ex: '2026-06-25'). "
+                "Dacă e dat, returnează doar evenimentele din ziua respectivă."
+            ),
+            "optional": True,
+        },
     },
     max_linii=20,
 )
-def evenimente_viitoare(numar: int = 10):
+def evenimente_viitoare(numar: int = 10, zi: str = ""):
     """Listează următoarele evenimente din calendarul principal al utilizatorului."""
     service = _obtine_service()
     if service is None:
@@ -118,22 +176,40 @@ def evenimente_viitoare(numar: int = 10):
 
     try:
         # FIX: utcnow() e deprecat; numar poate veni ca float (5.0) -> API-ul respinge maxResults
-        acum = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        acum_dt = datetime.datetime.now(datetime.timezone.utc)
+        acum = acum_dt.isoformat()
         try:
             numar = max(1, min(int(numar), 100))
         except (TypeError, ValueError):
             numar = 10
-        rezultat = (
-            service.events()
-            .list(
-                calendarId="primary",
-                timeMin=acum,
-                maxResults=numar,
-                singleEvents=True,
-                orderBy="startTime",
-            )
-            .execute()
-        )
+
+        parametri = dict(calendarId="primary", timeMin=acum, maxResults=numar,
+                         singleEvents=True, orderBy="startTime")
+
+        # FIX: nu se putea cere „azi"/„mâine" — se luau doar următoarele N evenimente.
+        zi_n = (zi or "").strip().lower().replace("â", "a")
+        if zi_n:
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(_FUS_ORAR)
+            except Exception:
+                tz = datetime.timezone.utc
+            azi = datetime.datetime.now(tz).date()
+            if zi_n == "azi":
+                data_zi = azi
+            elif zi_n == "maine":
+                data_zi = azi + datetime.timedelta(days=1)
+            else:
+                try:
+                    data_zi = datetime.date.fromisoformat(zi_n[:10])
+                except ValueError:
+                    return f"Nu înțeleg ziua '{zi}'. Folosește 'azi', 'maine' sau o dată ISO (2026-06-25)."
+            inceput_zi = datetime.datetime.combine(data_zi, datetime.time.min, tzinfo=tz)
+            parametri["timeMin"] = max(inceput_zi, acum_dt.astimezone(tz)).isoformat() \
+                if data_zi == azi else inceput_zi.isoformat()
+            parametri["timeMax"] = (inceput_zi + datetime.timedelta(days=1)).isoformat()
+
+        rezultat = service.events().list(**parametri).execute()
         evenimente = rezultat.get("items", [])
 
         if not evenimente:
@@ -189,8 +265,8 @@ def creeaza_eveniment(titlu: str, inceput: str, sfarsit: str, descriere: str = "
     eveniment = {
         "summary": titlu,
         "description": descriere,
-        "start": {"dateTime": inceput, "timeZone": "Europe/Chisinau"},
-        "end": {"dateTime": sfarsit, "timeZone": "Europe/Chisinau"},
+        "start": {"dateTime": inceput, "timeZone": _FUS_ORAR},
+        "end": {"dateTime": sfarsit, "timeZone": _FUS_ORAR},
     }
 
     try:
@@ -225,3 +301,9 @@ def sterge_eveniment(eveniment_id: str):
         return f"Eveniment {eveniment_id} șters."
     except HttpError as e:
         return f"Eroare la ștergerea evenimentului: {str(e)}"
+
+
+if __name__ == "__main__":
+    # Reautentificare manuală (din terminal): `python -m src.tools.calendar_google`
+    _service = None
+    print("Calendar OK." if _obtine_service() else _mesaj_lipsa_config())

@@ -92,8 +92,78 @@ def _obtine_client_gemini():
         )
 
     clienti = [genai.Client(api_key=k) for k in chei]
-    rotatie = itertools.cycle(clienti)
-    return rotatie
+    return _RotatieClienti(clienti)
+
+
+class _RotatieClienti:
+    """Iterator ciclic peste clienți, cu __len__ (câte chei avem) și lock pentru thread-uri."""
+
+    def __init__(self, clienti):
+        self._n = len(clienti)
+        self._ciclu = itertools.cycle(clienti)
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        return self._n
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self._lock:
+            return next(self._ciclu)
+
+
+# Câte secunde de inactivitate (fără vorbire utilă) până revenim la ascultarea pasivă („Hey Jarvis").
+TIMEOUT_INACTIVITATE_SECUNDE = float(os.getenv("JARVIS_VOICE_IDLE_SECONDS", "30"))
+
+_COD_TEMPORAR = (503, 429, 500, 502, 504, 403)
+
+
+def _e_eroare_temporara(e: Exception) -> bool:
+    """Eșec temporar al cheii curente (limită/indisponibilitate) -> merită cheia următoare."""
+    for atribut in ("code", "status_code"):
+        cod = getattr(e, atribut, None)
+        if isinstance(cod, int) and cod in _COD_TEMPORAR:
+            return True
+    mesaj = str(e)
+    if any(re.search(rf"(?<!\d){c}(?!\d)", mesaj) for c in _COD_TEMPORAR):
+        return True
+    return any(m in mesaj.upper() for m in ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "OVERLOADED", "TIMEOUT", "TIMED OUT"))
+
+
+def _agent_streaming_cu_fallback_chei(
+    rotatie_clienti, model, prompt, istoric, lungime_inainte, la_propozitie, flag_intrerupere,
+):
+    """
+    FIX: pe calea „unelte" se făcea un singur next(rotatie_clienti); dacă acea cheie dădea
+    429/503, auzeai „am întâmpinat o eroare", deși modul text încearcă toate cheile.
+    Încearcă fiecare cheie o dată. Nu reîncearcă dacă s-a rostit deja ceva (ar repeta vocea).
+    """
+    incercari = max(1, len(rotatie_clienti)) if hasattr(rotatie_clienti, "__len__") else 3
+    rostit = []
+
+    def _la_propozitie_marcata(propozitie):
+        rostit.append(True)
+        la_propozitie(propozitie)
+
+    ultima = None
+    for _ in range(incercari):
+        client = next(rotatie_clienti)
+        try:
+            return agent_loop_streaming(
+                client, model, prompt, istoric,
+                la_propozitie_gata=_la_propozitie_marcata,
+                flag_intrerupere=flag_intrerupere,
+            )
+        except Exception as e:
+            if rostit or not _e_eroare_temporara(e):
+                raise
+            ultima = e
+            print(f"[Cheie Gemini indisponibilă ({str(e)[:80]}) — încerc următoarea]")
+            del istoric[lungime_inainte + 1:]  # păstrăm doar mesajul utilizatorului
+            time.sleep(0.5)
+    raise ultima
 
 
 # System prompt separat pentru NVIDIA (conversație/cod, FĂRĂ unelte reale) —
@@ -249,6 +319,14 @@ def _porneste_bucla_audio_interna(
     print("  Spune 'exit' sau 'stop' pentru a ieși.")
     print("═" * 50 + "\n")
 
+    # FIX: după „Hey Jarvis" bucla rămânea deschisă la nesfârșit (răspundea la TV, alte persoane).
+    # Dacă nu există vorbire utilă TIMEOUT_INACTIVITATE_SECUNDE, ieșim -> wake_word.py revine
+    # la ascultarea pasivă.
+    ultima_activitate = time.monotonic()
+
+    def _inactiv_prea_mult() -> bool:
+        return (time.monotonic() - ultima_activitate) >= TIMEOUT_INACTIVITATE_SECUNDE
+
     while True:
         # ── Pasul 1: VAD — așteptăm să vorbești ──────────────────────────
         print(INDICATOR["ascult"])
@@ -256,6 +334,9 @@ def _porneste_bucla_audio_interna(
 
         if audio is None:
             # Timeout de siguranță din VAD — nu s-a detectat nicio vorbire
+            if _inactiv_prea_mult():
+                print("[Voce] Inactivitate — revin la ascultarea pasivă.")
+                break
             continue
 
         # ── Pasul 2: STT — transcriem ce ai spus ─────────────────────────
@@ -264,6 +345,9 @@ def _porneste_bucla_audio_interna(
 
         if not text_utilizator.strip():
             print("[Transcriere goală — poate zgomot de fundal, reiau ascultarea]")
+            if _inactiv_prea_mult():
+                print("[Voce] Inactivitate — revin la ascultarea pasivă.")
+                break
             continue
 
         print(f"Tu (vocal): {text_utilizator}")
@@ -346,11 +430,9 @@ def _porneste_bucla_audio_interna(
                 if categorie == "unelte":
                     # Singura cale cu tool-calling real — Gemini, streaming nativ.
                     try:
-                        client_curent = next(rotatie_clienti)
-                        raspuns_final = agent_loop_streaming(
-                            client_curent, model, prompt_tura, istoric,
-                            la_propozitie_gata=_la_propozitie,
-                            flag_intrerupere=flag_intrerupere,
+                        raspuns_final = _agent_streaming_cu_fallback_chei(
+                            rotatie_clienti, model, prompt_tura, istoric, lungime_inainte,
+                            _la_propozitie, flag_intrerupere,
                         )
                     except Exception as e:
                         eroare_de_afisat = e
@@ -376,11 +458,9 @@ def _porneste_bucla_audio_interna(
                         print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
                         _ultima_categorie_vocal = "unelte"
                         try:
-                            client_curent = next(rotatie_clienti)
-                            raspuns_final = agent_loop_streaming(
-                                client_curent, model, prompt_tura, istoric,
-                                la_propozitie_gata=_la_propozitie,
-                                flag_intrerupere=flag_intrerupere,
+                            raspuns_final = _agent_streaming_cu_fallback_chei(
+                                rotatie_clienti, model, prompt_tura, istoric, lungime_inainte,
+                                _la_propozitie, flag_intrerupere,
                             )
                         except Exception as e:
                             eroare_de_afisat = e
@@ -418,6 +498,8 @@ def _porneste_bucla_audio_interna(
                 args=(sesiune_id, text_utilizator, raspuns_final, next(rotatie_clienti), model),
                 daemon=True,
             ).start()
+
+        ultima_activitate = time.monotonic()  # tura s-a încheiat -> reîncepe numărătoarea inactivității
 
         if flag_intrerupere.is_set():
             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")

@@ -1,0 +1,2761 @@
+diff --git a/jarvis-fixes-3-pana-8.patch b/jarvis-fixes-3-pana-8.patch
+deleted file mode 100644
+index 5e89d3d..0000000
+--- a/jarvis-fixes-3-pana-8.patch
++++ /dev/null
+@@ -1,1355 +0,0 @@
+-diff --git a/main.py b/main.py
+-index 72cc402..4fecf54 100644
+---- a/main.py
+-+++ b/main.py
+-@@ -22,7 +22,8 @@ from src.core.monitor_ecran import porneste_monitorizare_ecran
+- from src.core.monitor_log import porneste_monitorizare_log
+- from src.tools.vedere import analizeaza_ecran_complet
+- from src.core.tts import spune
+--from src.core.stare_conversatie import conversatie_activa
+-+from src.core.stare_conversatie import conversatie_activa, lock_istoric
+-+from src.core.context_rag import prompt_pentru_tura
+- from src.core.llm_provider import (
+-     intreaba_nvidia_conversatie,
+-     intreaba_nvidia_cod,
+-@@ -210,7 +211,8 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
+-     if groq_client:
+-         print("[Toate cheile Gemini sunt indisponibile — comut pe Groq]")
+-         try:
+--            rezultat_groq = groq_fallback(istoric, system_prompt)
+-+            # FIX: Groq nu are unelte; fără avertisment, promptul îi spune că poate controla sistemul -> acțiuni „făcute" inventate.
+-+            rezultat_groq = groq_fallback(istoric, AVERTISMENT_NVIDIA_FARA_UNELTE + "\n\n" + system_prompt)
+-             if rezultat_groq:
+-                 return rezultat_groq
+-         except Exception as e:
+-@@ -218,7 +220,7 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
+-     else:
+-         print("[Toate cheile Gemini sunt indisponibile și Groq nu e configurat — încerc cascada externă]")
+- 
+--    rezultat_extern = ruleaza_cascada_externa(istoric, system_prompt)
+-+    rezultat_extern = ruleaza_cascada_externa(istoric, AVERTISMENT_NVIDIA_FARA_UNELTE + "\n\n" + system_prompt)
+-     if rezultat_extern:
+-         return rezultat_extern
+- 
+-@@ -406,31 +408,35 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
+-             if not mesaj_utilizator.strip():
+-                 continue
+- 
+--            mesaj_curent = types.Content(
+--                role="user", parts=[types.Part(text=mesaj_utilizator)]
+--            )
+--            istoric.append(mesaj_curent)
+--
+--            try:
+--                # Sliding window
+--                proceseaza_context(
+--                    istoric, sesiune_id,
+--                    client=urmatorul_client(), model=GEMINI_MODEL,
+-+            # FIX: tura întreagă sub lock — wake-word rulează pe alt thread cu același `istoric`.
+-+            with lock_istoric:
+-+                mesaj_curent = types.Content(
+-+                    role="user", parts=[types.Part(text=mesaj_utilizator)]
+-                 )
+--                _curata_inceput_istoric(istoric)
+--
+--                # Răspuns
+--                raspuns_text = ruleaza_cu_fallback(istoric, system_prompt)
+--            except KeyboardInterrupt:
+--                print("\n[Cererea a fost întreruptă.]")
+--                _anuleaza_tura(istoric, mesaj_curent)
+--                continue
+--            except Exception as e:
+--                # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
+--                # nu lasă mesajul utilizatorului "agățat" în istoric.
+--                print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
+--                _anuleaza_tura(istoric, mesaj_curent)
+--                continue
+-+                istoric.append(mesaj_curent)
+-+
+-+                try:
+-+                    # Sliding window
+-+                    proceseaza_context(
+-+                        istoric, sesiune_id,
+-+                        client=urmatorul_client(), model=GEMINI_MODEL,
+-+                    )
+-+                    _curata_inceput_istoric(istoric)
+-+
+-+                    # Răspuns
+-+                    # Profil + amintiri proaspete + context RAG pentru tura curentă
+-+                    prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT_BAZA, system_prompt, mesaj_utilizator, sesiune_id)
+-+                    raspuns_text = ruleaza_cu_fallback(istoric, prompt_tura)
+-+                except KeyboardInterrupt:
+-+                    print("\n[Cererea a fost întreruptă.]")
+-+                    _anuleaza_tura(istoric, mesaj_curent)
+-+                    continue
+-+                except Exception as e:
+-+                    # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
+-+                    # nu lasă mesajul utilizatorului "agățat" în istoric.
+-+                    print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
+-+                    _anuleaza_tura(istoric, mesaj_curent)
+-+                    continue
+- 
+-             if not raspuns_text:
+-                 raspuns_text = "Vasea, nu am primit niciun răspuns de la provideri. Reîncearcă."
+-@@ -563,7 +569,7 @@ def _la_eroare_log(sursa: str, linie: str):
+-     print(f"\n🔔 [Jarvis observă — {sursa}]: {linie}\nTu: ", end="", flush=True)
+- 
+- 
+--def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_gemini):
+-+def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_gemini, sesiune_id=None):
+-     """
+-     Ascultare pasivă ("Hey Jarvis"), pornită în fundal INDIFERENT de modul de
+-     interacțiune ales. Eșuează elegant dacă dependențele audio lipsesc.
+-@@ -583,6 +589,7 @@ def _porneste_ascultare_pasiva_daca_posibil(istoric_ref, rotatie_clienti, model_
+-                 istoric=istoric_ref,
+-                 rotatie_clienti=rotatie_clienti,
+-                 model_gemini=model_gemini,
+-+                sesiune_id=sesiune_id,
+-             )
+-         except Exception as e:
+-             print(f"[Senzorial] Ascultare pasivă oprită din cauza unei erori: {e}")
+-@@ -634,6 +641,7 @@ def main():
+-                 istoric=istoric,
+-                 rotatie_clienti=_gemini_rotatie,
+-                 model_gemini=GEMINI_MODEL,
+-+                sesiune_id=sesiune_id,
+-             )
+-         except KeyboardInterrupt:
+-             print("\nJarvis: La revedere, Vasea.")
+-@@ -650,6 +658,7 @@ def main():
+-                 "istoric": istoric,
+-                 "rotatie_clienti": _gemini_rotatie,
+-                 "model_gemini": GEMINI_MODEL,
+-+                "sesiune_id": sesiune_id,
+-             },
+-             daemon=True,
+-         ).start()
+-@@ -658,7 +667,7 @@ def main():
+- 
+-     else:
+-         # Modul implicit [1]: text în terminal + ascultare pasivă în fundal (Task 6.8).
+--        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL)
+-+        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
+-         bucla_text(istoric, sesiune_id, system_prompt)
+- 
+- 
+-diff --git a/src/core/audio_loop.py b/src/core/audio_loop.py
+-index 41d3a18..a2451a9 100644
+---- a/src/core/audio_loop.py
+-+++ b/src/core/audio_loop.py
+-@@ -46,7 +46,12 @@ from src.core.tts import spune
+- from src.core.barge_in import vorbeste_cu_intrerupere
+- from src.core.agent import agent_loop_streaming, _PATTERN_SFARSIT_PROPOZITIE
+- from src.core.router import clasifica, este_raspuns_scurt_de_continuare
+--from src.core.stare_conversatie import conversatie_activa
+-+from src.core.stare_conversatie import conversatie_activa, lock_istoric
+-+from src.core.context_manager import proceseaza as proceseaza_context, MAX_MESAJE_CONTEXT
+-+from src.core.persistenta_tura import salveaza_tura
+-+from src.core.context_rag import prompt_pentru_tura
+-+from src.core.confirmare_vocala import cere_confirmare_vocala
+-+from src.core.security import canal_confirmare
+- from src.core.llm_provider import (
+-     intreaba_nvidia_cod,
+-     intreaba_nvidia_conversatie,
+-@@ -163,6 +168,63 @@ def porneste_bucla_audio(
+-     istoric: list | None = None,
+-     rotatie_clienti=None,
+-     model: str = "gemini-3.6-flash",  # FIX: era 2.5-flash; restul proiectului folosește 3.6-flash
+-+    sesiune_id: str | None = None,
+-+) -> None:
+-+    """
+-+    Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
+-+
+-+    Parametri:
+-+        istoric:          lista de mesaje existentă (din main.py), sau None
+-+                          pentru o conversație nouă independentă.
+-+        rotatie_clienti:  iteratorul de clienți Gemini din main.py (opțional,
+-+                          dacă None construim unul nou din .env).
+-+        model:            modelul Gemini de folosit.
+-+        sesiune_id:       sesiunea DB în care se salvează turele (opțional; dacă lipsește,
+-+                          se creează una proprie și se închide la final).
+-+
+-+    FIX: modul vocal nu salva nimic în DB/RAG/memorie, nu limita istoricul (creștea nelimitat)
+-+    și folosea un system prompt fără profil/amintiri. Acum face toate cele trei.
+-+    """
+-+    if istoric is None:
+-+        istoric = []
+-+    if rotatie_clienti is None:
+-+        rotatie_clienti = _obtine_client_gemini()
+-+
+-+    sesiune_proprie = False
+-+    try:
+-+        from src.core.database import db
+-+        if sesiune_id is None:
+-+            sesiune_id = db.incepe_sesiune()
+-+            sesiune_proprie = True
+-+    except Exception as e:
+-+        print(f"[Voce] Nu pot folosi DB-ul pentru sesiune: {e}")
+-+        sesiune_id = None
+-+
+-+    try:
+-+        from src.core.memory import memorie
+-+        system_prompt = memorie.construieste_system_prompt(SYSTEM_PROMPT)
+-+    except Exception as e:
+-+        print(f"[Voce] Nu am putut adăuga profilul/amintirile în prompt: {e}")
+-+        system_prompt = SYSTEM_PROMPT
+-+
+-+    try:
+-+        # Confirmările de securitate se dau vocal, nu prin input() în terminal.
+-+        with canal_confirmare(cere_confirmare_vocala):
+-+            _porneste_bucla_audio_interna(istoric, rotatie_clienti, model, sesiune_id, system_prompt)
+-+    finally:
+-+        if sesiune_proprie:
+-+            try:
+-+                db.inchide_sesiune(sesiune_id)
+-+            except Exception as e:
+-+                print(f"[DB] Nu am putut închide sesiunea vocală: {e}")
+-+
+-+
+-+def _porneste_bucla_audio_interna(
+-+    istoric: list,
+-+    rotatie_clienti,
+-+    model: str,
+-+    sesiune_id,
+-+    system_prompt: str,
+- ) -> None:
+-     """
+-     Pornește bucla audio continuă VAD → STT → Agent (streaming) → TTS.
+-@@ -224,114 +286,138 @@ def porneste_bucla_audio(
+-             break
+- 
+-         # ── Pasul 3+4: Router → Agent (Gemini sau NVIDIA) + TTS pe măsură ──
+--        print(INDICATOR["gandesc"])
+--        lungime_inainte = len(istoric)
+--        istoric.append(
+--            types.Content(
+--                role="user",
+--                parts=[types.Part(text=text_utilizator)]
+--            )
+--        )
+--
+--        print(INDICATOR["vorbesc"])
+--        flag_intrerupere = threading.Event()
+--
+--        def _la_propozitie(propozitie: str):
+--            """
+--            Vorbește o propoziție IMEDIAT prin vorbeste_cu_intrerupere
+--            (Task 6.10 — ascultă concurent pentru barge-in). Dacă Vasea
+--            vorbește peste Jarvis, setăm flag_intrerupere.
+--            """
+--            print(f"Jarvis: {propozitie}")
+--
+--            a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
+--            if a_fost_intrerupt:
+--                flag_intrerupere.set()
+--
+--        # Clasificăm cererea — la fel ca în modul text (main.py), ca să nu
+--        # trimitem TOTUL pe Gemini și să epuizăm cota gratuită (429
+--        # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
+--        # de nicio unealtă reală.
+--        global _ultima_categorie_vocal
+--        if este_raspuns_scurt_de_continuare(text_utilizator):
+--            categorie = _ultima_categorie_vocal
+--            print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
+--        else:
+--            categorie = clasifica(text_utilizator)
+--            print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
+--        _ultima_categorie_vocal = categorie
+--
+--        eroare_de_afisat = None
+--
+--        # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
+--        # ture (toate propozițiile răspunsului, nu doar una), ca alertele
+--        # de ecran (main.py, _la_schimbare_ecran) să nu se strecoare între
+--        # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
+--        conversatie_activa.set()
+--        try:
+--            if categorie == "unelte":
+--                # Singura cale cu tool-calling real — Gemini, streaming nativ.
+-+        # FIX: tura sub lock — același `istoric` e folosit de bucla text (main.py).
+-+        with lock_istoric:
+-+            print(INDICATOR["gandesc"])
+-+            # FIX: istoricul vocal nu era niciodată limitat (creștea la nesfârșit, cost + risc de 400).
+-+            if len(istoric) > MAX_MESAJE_CONTEXT:
+-                 try:
+--                    client_curent = next(rotatie_clienti)
+--                    agent_loop_streaming(
+--                        client_curent, model, SYSTEM_PROMPT, istoric,
+--                        la_propozitie_gata=_la_propozitie,
+--                        flag_intrerupere=flag_intrerupere,
+--                    )
+-+                    proceseaza_context(istoric, sesiune_id or "voce",
+-+                                       client=next(rotatie_clienti), model=model)
+-                 except Exception as e:
+--                    eroare_de_afisat = e
+--            else:
+--                # "cod" / "conversatie" — NVIDIA întâi, FĂRĂ unelte reale.
+--                mesaje_openai = istoric_la_mesaje_openai(
+--                    istoric, _AVERTISMENT_NVIDIA_VOCAL + "\n\n" + SYSTEM_PROMPT
+--                )
+--                rezultat = (
+--                    intreaba_nvidia_cod(mesaje_openai)
+--                    if categorie == "cod"
+--                    else intreaba_nvidia_conversatie(mesaje_openai)
+-+                    print(f"[Context] Rezumarea istoricului vocal a eșuat: {e}")
+-+            lungime_inainte = len(istoric)
+-+            istoric.append(
+-+                types.Content(
+-+                    role="user",
+-+                    parts=[types.Part(text=text_utilizator)]
+-                 )
+-+            )
+- 
+--                if rezultat:
+--                    istoric.append(
+--                        types.Content(role="model", parts=[types.Part(text=rezultat)])
+--                    )
+--                    _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
+--                else:
+--                    # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
+--                    print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
+--                    _ultima_categorie_vocal = "unelte"
+-+            print(INDICATOR["vorbesc"])
+-+            flag_intrerupere = threading.Event()
+-+
+-+            def _la_propozitie(propozitie: str):
+-+                """
+-+                Vorbește o propoziție IMEDIAT prin vorbeste_cu_intrerupere
+-+                (Task 6.10 — ascultă concurent pentru barge-in). Dacă Vasea
+-+                vorbește peste Jarvis, setăm flag_intrerupere.
+-+                """
+-+                print(f"Jarvis: {propozitie}")
+-+
+-+                a_fost_intrerupt = vorbeste_cu_intrerupere(propozitie)
+-+                if a_fost_intrerupt:
+-+                    flag_intrerupere.set()
+-+
+-+            # Clasificăm cererea — la fel ca în modul text (main.py), ca să nu
+-+            # trimitem TOTUL pe Gemini și să epuizăm cota gratuită (429
+-+            # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
+-+            # de nicio unealtă reală.
+-+            global _ultima_categorie_vocal
+-+            if este_raspuns_scurt_de_continuare(text_utilizator):
+-+                categorie = _ultima_categorie_vocal
+-+                print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
+-+            else:
+-+                categorie = clasifica(text_utilizator)
+-+                print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
+-+            _ultima_categorie_vocal = categorie
+-+
+-+            eroare_de_afisat = None
+-+            raspuns_final = ""
+-+            # Profil + amintiri proaspete + context RAG, calculat pentru tura curentă.
+-+            prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT, system_prompt, text_utilizator, sesiune_id)
+-+
+-+            # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
+-+            # ture (toate propozițiile răspunsului, nu doar una), ca alertele
+-+            # de ecran (main.py, _la_schimbare_ecran) să nu se strecoare între
+-+            # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
+-+            conversatie_activa.set()
+-+            try:
+-+                if categorie == "unelte":
+-+                    # Singura cale cu tool-calling real — Gemini, streaming nativ.
+-                     try:
+-                         client_curent = next(rotatie_clienti)
+--                        agent_loop_streaming(
+--                            client_curent, model, SYSTEM_PROMPT, istoric,
+-+                        raspuns_final = agent_loop_streaming(
+-+                            client_curent, model, prompt_tura, istoric,
+-                             la_propozitie_gata=_la_propozitie,
+-                             flag_intrerupere=flag_intrerupere,
+-                         )
+-                     except Exception as e:
+-                         eroare_de_afisat = e
+-+                else:
+-+                    # "cod" / "conversatie" — NVIDIA întâi, FĂRĂ unelte reale.
+-+                    mesaje_openai = istoric_la_mesaje_openai(
+-+                        istoric, _AVERTISMENT_NVIDIA_VOCAL + "\n\n" + prompt_tura
+-+                    )
+-+                    rezultat = (
+-+                        intreaba_nvidia_cod(mesaje_openai)
+-+                        if categorie == "cod"
+-+                        else intreaba_nvidia_conversatie(mesaje_openai)
+-+                    )
+- 
+--            if eroare_de_afisat is not None:
+--                e = eroare_de_afisat
+--                raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
+--                print(f"[EROARE agent]: {e}")
+--                # FIX: print_exc() în afara blocului except afișa doar
+--                # "NoneType: None" — excepția era deja ieșită din scope.
+--                traceback.print_exception(type(e), e, e.__traceback__)
+--                # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
+--                # ca să nu rămână "user" consecutiv în istoric.
+--                # FIX: ștergem necondiționat — dacă ultimul element era un
+--                # turn "model" cu function_call fără răspuns, vechea condiție
+--                # (role == "user") lăsa istoricul corupt pentru totdeauna.
+--                del istoric[lungime_inainte:]
+--                try:
+--                    spune(raspuns_text)
+--                except Exception as e_tts:
+--                    print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
+--        finally:
+--            # Garantăm eliberarea flag-ului indiferent de rezultat — altfel
+--            # o eroare neprevăzută ar lăsa alertele de ecran blocate la
+--            # coadă pentru totdeauna, crezând că o conversație e încă activă.
+--            conversatie_activa.clear()
+-+                    if rezultat:
+-+                        raspuns_final = rezultat
+-+                        istoric.append(
+-+                            types.Content(role="model", parts=[types.Part(text=rezultat)])
+-+                        )
+-+                        _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
+-+                    else:
+-+                        # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
+-+                        print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
+-+                        _ultima_categorie_vocal = "unelte"
+-+                        try:
+-+                            client_curent = next(rotatie_clienti)
+-+                            raspuns_final = agent_loop_streaming(
+-+                                client_curent, model, prompt_tura, istoric,
+-+                                la_propozitie_gata=_la_propozitie,
+-+                                flag_intrerupere=flag_intrerupere,
+-+                            )
+-+                        except Exception as e:
+-+                            eroare_de_afisat = e
+-+
+-+                if eroare_de_afisat is not None:
+-+                    e = eroare_de_afisat
+-+                    raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
+-+                    print(f"[EROARE agent]: {e}")
+-+                    # FIX: print_exc() în afara blocului except afișa doar
+-+                    # "NoneType: None" — excepția era deja ieșită din scope.
+-+                    traceback.print_exception(type(e), e, e.__traceback__)
+-+                    # Mesajul utilizatorului rămâne fără răspuns: îl scoatem,
+-+                    # ca să nu rămână "user" consecutiv în istoric.
+-+                    # FIX: ștergem necondiționat — dacă ultimul element era un
+-+                    # turn "model" cu function_call fără răspuns, vechea condiție
+-+                    # (role == "user") lăsa istoricul corupt pentru totdeauna.
+-+                    del istoric[lungime_inainte:]
+-+                    try:
+-+                        spune(raspuns_text)
+-+                    except Exception as e_tts:
+-+                        print(f"[EROARE TTS]: {type(e_tts).__name__}: {e_tts}")
+-+            finally:
+-+                # Garantăm eliberarea flag-ului indiferent de rezultat — altfel
+-+                # o eroare neprevăzută ar lăsa alertele de ecran blocate la
+-+                # coadă pentru totdeauna, crezând că o conversație e încă activă.
+-+                conversatie_activa.clear()
+-+
+-+        # FIX: salvăm tura vocală (DB + RAG + amintiri), pe thread separat ca să nu întârziem ascultarea.
+-+        # Salvăm doar dacă tura s-a încheiat cu un răspuns real al modelului în istoric: agent_loop_streaming
+-+        # întoarce și mesaje de avarie (fără răspuns valid / buclă prea lungă) care NU sunt în istoric.
+-+        a_raspuns_real = bool(istoric) and istoric[-1].role == "model"
+-+        if sesiune_id and raspuns_final and a_raspuns_real and eroare_de_afisat is None and raspuns_final != "[întrerupt]":
+-+            threading.Thread(
+-+                target=salveaza_tura,
+-+                args=(sesiune_id, text_utilizator, raspuns_final, next(rotatie_clienti), model),
+-+                daemon=True,
+-+            ).start()
+- 
+-         if flag_intrerupere.is_set():
+-             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")
+-diff --git a/src/core/confirmare_vocala.py b/src/core/confirmare_vocala.py
+-new file mode 100644
+-index 0000000..3055da3
+---- /dev/null
+-+++ b/src/core/confirmare_vocala.py
+-@@ -0,0 +1,80 @@
+-+"""
+-+Confirmare vocală pentru acțiunile care cer aprobare (security.py).
+-+
+-+Până acum confirmarea se făcea doar cu input() în terminal: în modul vocal Jarvis aștepta
+-+în tăcere să tastezi „da", iar microfonul rămânea blocat. Aici Jarvis întreabă cu voce tare
+-+și ascultă „da" / „nu".
+-+
+-+Principii:
+-+  - fail closed: orice neclaritate, eroare sau tăcere = NU se execută;
+-+  - orice negație („nu", „stop", „anulează") bate orice afirmație („da, dar nu acum" = NU);
+-+  - blacklist-ul din security.py rămâne necondiționat, fără confirmare.
+-+Atenție: o confirmare vocală e mai slabă decât una tastată (oricine aude mesajul sau un
+-+sunet din fundal poate spune „da"); de aceea cerem răspuns scurt și clar.
+-+"""
+-+
+-+import re
+-+import unicodedata
+-+
+-+MAX_INCERCARI = 3
+-+MAX_CUVINTE_RASPUNS = 8   # un răspuns mai lung nu e o confirmare clară
+-+
+-+_DA = {"da", "daa", "sigur", "confirm", "confirmat", "executa", "ok", "okay", "bine",
+-+       "desigur", "aprob", "aprobat", "continua"}
+-+_NU = {"nu", "nuu", "stop", "anuleaza", "anulez", "anulat", "renunt", "opreste", "niciodata"}
+-+
+-+
+-+def _normalizeaza(text: str) -> list[str]:
+-+    fara_diacritice = "".join(
+-+        c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn"
+-+    )
+-+    return re.findall(r"[a-z]+", fara_diacritice)
+-+
+-+
+-+def interpreteaza_raspuns(text: str):
+-+    """True = confirmat, False = refuzat, None = neclar (se reîntreabă)."""
+-+    cuvinte = _normalizeaza(text or "")
+-+    if not cuvinte or len(cuvinte) > MAX_CUVINTE_RASPUNS:
+-+        return None
+-+    if any(c in _NU for c in cuvinte):
+-+        return False
+-+    if any(c in _DA for c in cuvinte) or "fa o" in " ".join(cuvinte):
+-+        return True
+-+    return None
+-+
+-+
+-+def _rezumat_actiune(nume_functie: str, argumente: dict) -> str:
+-+    nume = nume_functie.replace("_", " ")
+-+    valori = [str(v).strip() for v in (argumente or {}).values() if str(v).strip()]
+-+    detalii = "; ".join(v[:60] for v in valori[:2])
+-+    return f"{nume}: {detalii}" if detalii else nume
+-+
+-+
+-+def cere_confirmare_vocala(nume_functie: str, argumente: dict) -> bool:
+-+    # Importuri târzii: modulul audio e greu (torch) și nu trebuie încărcat în modul text.
+-+    from src.core.tts import spune
+-+    from src.core.vad import obtine_detector
+-+    from src.core.stt import transcrie
+-+
+-+    try:
+-+        spune(f"Vasea, vreau să execut {_rezumat_actiune(nume_functie, argumente)}. "
+-+              f"Confirmi? Spune da sau nu.")
+-+        detector = obtine_detector()
+-+        for _ in range(MAX_INCERCARI):
+-+            audio = detector.asculta_pana_la_pauza()
+-+            if audio is None:
+-+                continue
+-+            text = transcrie(audio)
+-+            print(f"[Confirmare vocală] Am auzit: '{text}'")
+-+            decizie = interpreteaza_raspuns(text)
+-+            if decizie is True:
+-+                spune("Confirmat.")
+-+                return True
+-+            if decizie is False:
+-+                spune("Anulat.")
+-+                return False
+-+            spune("Nu am înțeles. Spune doar da sau nu.")
+-+        spune("Nu am primit o confirmare clară. Anulez acțiunea.")
+-+    except Exception as e:
+-+        print(f"[Confirmare vocală] Eroare: {type(e).__name__}: {e} — acțiune refuzată.")
+-+    return False
+-diff --git a/src/core/consolidare.py b/src/core/consolidare.py
+-index 3b01a05..8e4b6c3 100644
+---- a/src/core/consolidare.py
+-+++ b/src/core/consolidare.py
+-@@ -198,7 +198,11 @@ class ConsolidareMemorie:
+-                     text = text[4:]
+-             text = text.strip()
+- 
+--            return json.loads(text)
+-+            date = json.loads(text)
+-+            # FIX: modelul putea „șterge" id-uri inventate sau din afara celor 50 trimise în prompt.
+-+            if isinstance(date, dict):
+-+                date["_ids_prompt"] = {a["id"] for a in amintiri}
+-+            return date
+- 
+-         except Exception as e:
+-             print(f"[Consolidare] Eroare AI: {e}")
+-@@ -278,8 +282,11 @@ class ConsolidareMemorie:
+-             de_sters = date_ai.get("de_sters") or []
+-             if not isinstance(de_sters, list):
+-                 de_sters = []
+-+            ids_permise = date_ai.get("_ids_prompt")
+-             for id_sters in de_sters:
+-                 try:
+-+                    if ids_permise is not None and int(id_sters) not in ids_permise:
+-+                        continue
+-                     self._sterge(int(id_sters))
+-                     rezultat["amintiri_sterse_ai"] += 1
+-                 except Exception:
+-diff --git a/src/core/context_rag.py b/src/core/context_rag.py
+-new file mode 100644
+-index 0000000..5ae32e8
+---- /dev/null
+-+++ b/src/core/context_rag.py
+-@@ -0,0 +1,48 @@
+-+"""
+-+Prompt-ul pentru o tură: profil + amintiri proaspete + context RAG din conversații anterioare.
+-+
+-+Înainte:
+-+  - amintirile intrau în prompt o singură dată, la pornire (un fapt învățat azi apărea abia după
+-+    repornire);
+-+  - RAG-ul indexa fiecare mesaj, dar nu era citit nicăieri pentru răspunsuri.
+-+"""
+-+
+-+MIN_CARACTERE_INTEROGARE = 12   # „da", „salut" etc. nu merită o căutare semantică
+-+PRAG_SCOR = 0.35
+-+MAX_CARACTERE_FRAGMENT = 300
+-+
+-+
+-+def prompt_pentru_tura(system_prompt_baza: str, system_prompt_rezerva: str,
+-+                       text_user: str, sesiune_id: str | None) -> str:
+-+    # 1) profil + amintiri citite acum din DB; dacă eșuează, folosim prompt-ul construit la pornire
+-+    try:
+-+        from src.core.memory import memorie
+-+        prompt = memorie.construieste_system_prompt(system_prompt_baza)
+-+    except Exception as e:
+-+        print(f"[Prompt] Nu am putut reîmprospăta amintirile: {e}")
+-+        prompt = system_prompt_rezerva
+-+
+-+    # 2) context RAG din ALTE sesiuni (turele sesiunii curente sunt deja în istoric)
+-+    if len((text_user or "").strip()) < MIN_CARACTERE_INTEROGARE:
+-+        return prompt
+-+    try:
+-+        from src.core.rag import rag
+-+        rezultate = rag.cauta(text_user, n=4)
+-+    except Exception as e:
+-+        print(f"[RAG] Căutare omisă: {e}")
+-+        return prompt
+-+
+-+    linii = []
+-+    for r in rezultate:
+-+        if r["scor"] < PRAG_SCOR:
+-+            continue
+-+        if r["sursa"] == "conversatii" and r["metadata"].get("sesiune_id") == sesiune_id:
+-+            continue
+-+        if r["text"] in prompt:  # amintirea e deja în prompt
+-+            continue
+-+        linii.append(f"- ({r['tip']}) {r['text'][:MAX_CARACTERE_FRAGMENT]}")
+-+
+-+    if not linii:
+-+        return prompt
+-+    return (prompt + "\n\n=== Context din conversații/amintiri anterioare, posibil relevant pentru "
+-+            "cererea curentă (folosește-l doar dacă ajută; nu îl cita) ===\n" + "\n".join(linii))
+-diff --git a/src/core/database.py b/src/core/database.py
+-index e2b4ba6..d75a2a0 100644
+---- a/src/core/database.py
+-+++ b/src/core/database.py
+-@@ -275,6 +275,20 @@ class JarvisDB:
+-         """
+-         acum = datetime.now().isoformat()
+-         with self._conexiune() as con:
+-+            # FIX: același fapt re-extras la fiecare tură se insera ca rând NOU. Duplicatele umpleau
+-+            # tabela și, având toate relevanța 1.0, acopereau cele 10 amintiri injectate în prompt.
+-+            # „Confirmarea" (documentată în consolidare.py) nu era implementată: acum o amintire
+-+            # identică doar își reîmprospătează `actualizat` și relevanța.
+-+            existent = con.execute(
+-+                "SELECT id, relevanta FROM memorie WHERE tip=? AND lower(trim(continut))=lower(trim(?))",
+-+                (tip, continut),
+-+            ).fetchone()
+-+            if existent:
+-+                con.execute(
+-+                    "UPDATE memorie SET actualizat=?, relevanta=? WHERE id=?",
+-+                    (acum, max(float(existent["relevanta"]), float(relevanta)), existent["id"]),
+-+                )
+-+                return existent["id"]
+-             cursor = con.execute(
+-                 """INSERT INTO memorie (tip, continut, sursa, relevanta, creat_la, actualizat)
+-                    VALUES (?, ?, ?, ?, ?, ?)""",
+-diff --git a/src/core/memory.py b/src/core/memory.py
+-index 95b22ec..492a44b 100644
+---- a/src/core/memory.py
+-+++ b/src/core/memory.py
+-@@ -140,6 +140,12 @@ class ManagerMemorie:
+-             print(f"[Memorie] Eroare la extragere: {e}")
+-             return 0
+- 
+-+        # FIX: modelul poate întoarce o listă sau valori non-string; `.get`/`.strip()` ar fi crăpat
+-+        # thread-ul de fundal cu un traceback.
+-+        if not isinstance(date, dict):
+-+            print("[Memorie] Răspuns de extragere neașteptat (nu e obiect JSON) — ignorat.")
+-+            return 0
+-+
+-         salvate = 0
+-         tip_map = {
+-             "fapte":               "fapt",
+-@@ -153,10 +159,13 @@ class ManagerMemorie:
+- 
+-         for cheie, tip in tip_map.items():
+-             prag = PRAG_LUNGIME.get(tip, 10)
+--            for item in date.get(cheie, []):
+-+            valori = date.get(cheie) or []
+-+            if not isinstance(valori, list):
+-+                continue
+-+            for item in valori:
+-                 # Filtrare selectivă: sub prag = ignorat, chiar dacă Gemini
+-                 # l-a extras — categoriile "grele" cer substanță reală.
+--                if item and len(item.strip()) > prag:
+-+                if isinstance(item, str) and len(item.strip()) > prag:
+-                     # Categoriile noi (mare valoare) pornesc cu relevanță
+-                     # maximă, ca să nu fie degradate/șterse prematur de
+-                     # consolidare.py față de fapte/preferințe obișnuite.
+-diff --git a/src/core/persistenta_tura.py b/src/core/persistenta_tura.py
+-new file mode 100644
+-index 0000000..c455047
+---- /dev/null
+-+++ b/src/core/persistenta_tura.py
+-@@ -0,0 +1,65 @@
+-+"""
+-+Persistența unei ture de conversație pentru modul vocal.
+-+
+-+Modul text (main.py) salvează fiecare tură în DB + RAG, extrage amintiri episodice și pornește
+-+periodic consolidarea. Bucla vocală (audio_loop.py) nu făcea nimic din toate astea, deci
+-+conversațiile vorbite se pierdeau și Jarvis nu învăța din ele. Funcția de aici face același lucru,
+-+dar sigur pentru fundal: orice eroare e înghițită, nu oprește conversația.
+-+"""
+-+
+-+import threading
+-+
+-+_lock_consolidare = threading.Lock()
+-+_ture = 0
+-+
+-+# Consolidarea memoriei rulează la fiecare N ture vocale (main.py folosește „la 10 mesaje" din DB,
+-+# condiție care nu mai pornea dacă totalul devenea impar).
+-+CONSOLIDARE_LA_N_TURE = 5
+-+
+-+
+-+def _consolidare_in_fundal(client, model: str) -> None:
+-+    if not _lock_consolidare.acquire(blocking=False):
+-+        return  # deja rulează una
+-+    try:
+-+        from src.core.consolidare import consolidare
+-+        consolidare.ruleaza(client=client, model=model)
+-+    except Exception as e:
+-+        print(f"[Memorie] Consolidare eșuată: {e}")
+-+    finally:
+-+        _lock_consolidare.release()
+-+
+-+
+-+def salveaza_tura(sesiune_id: str, text_user: str, raspuns: str, client=None,
+-+                  model: str = "gemini-3.6-flash") -> None:
+-+    """Salvează tura în DB și RAG, extrage amintiri și, din când în când, consolidează memoria."""
+-+    global _ture
+-+    if not sesiune_id or not text_user or not raspuns:
+-+        return
+-+
+-+    try:
+-+        from src.core.database import db
+-+        db.salveaza_mesaj(sesiune_id, "user", text_user)
+-+        db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+-+    except Exception as e:
+-+        print(f"[Memorie] Salvare în DB eșuată: {e}")
+-+        return
+-+
+-+    try:
+-+        from src.core.rag import rag
+-+        rag.indexeaza_mesaj("user", text_user, sesiune_id)
+-+        rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+-+    except Exception as e:
+-+        print(f"[Memorie] Indexare RAG eșuată: {e}")
+-+
+-+    if client is None:
+-+        return
+-+
+-+    try:
+-+        from src.core.memory import memorie
+-+        memorie.extrage_si_salveaza(text_user, raspuns, sesiune_id, client, model)
+-+    except Exception as e:
+-+        print(f"[Memorie] Extragere omisă: {e}")
+-+
+-+    _ture += 1
+-+    if _ture % CONSOLIDARE_LA_N_TURE == 0:
+-+        threading.Thread(target=_consolidare_in_fundal, args=(client, model), daemon=True).start()
+-diff --git a/src/core/profile.py b/src/core/profile.py
+-index bbaab3d..b49e2da 100644
+---- a/src/core/profile.py
+-+++ b/src/core/profile.py
+-@@ -69,6 +69,10 @@ class ProfilUtilizator:
+-             existent = db.get_profil(cheie)
+-             if not existent:
+-                 db.seteaza_profil(cheie, valoare_implicita)
+-+            elif cheie in ("director_proiect", "venv_path") and not Path(existent).exists():
+-+                # FIX: căile derivate din locația repo-ului se salvau o singură dată; după mutarea/
+-+                # clonarea proiectului în alt loc (DB-ul din ~/.jarvis e partajat) rămâneau greșite.
+-+                db.seteaza_profil(cheie, valoare_implicita)
+- 
+-     def get(self, cheie: str, default: str = "") -> str:
+-         """Returnează valoarea unei chei din profil."""
+-diff --git a/src/core/registry.py b/src/core/registry.py
+-index a8350c0..7038738 100644
+---- a/src/core/registry.py
+-+++ b/src/core/registry.py
+-@@ -194,6 +194,23 @@ def get_unelte_pentru_gemini(doar_functiile: list[str] | None = None) -> list[ty
+-     return [types.Tool(function_declarations=declaratii)]
+- 
+- 
+-+def _normalizeaza_argumente(nume_functie: str, argumente: dict) -> dict:
+-+    """
+-+    FIX: Gemini poate trimite parametrii INTEGER ca float (8000.0, 5.0). Autorul tratase asta doar
+-+    în porneste_server_http; unelte ca git_log, evenimente_viitoare, deruleaza etc. primeau float.
+-+    Convertim centralizat, după tipul declarat în schemă.
+-+    """
+-+    declaratie = DECLARATII_FUNCTII.get(nume_functie)
+-+    proprietati = getattr(getattr(declaratie, "parameters", None), "properties", None) or {}
+-+    rezultat = dict(argumente or {})
+-+    for nume, valoare in rezultat.items():
+-+        schema = proprietati.get(nume)
+-+        tip = getattr(getattr(schema, "type", None), "value", getattr(schema, "type", None))
+-+        if str(tip).upper() == "INTEGER" and isinstance(valoare, float) and valoare.is_integer():
+-+            rezultat[nume] = int(valoare)
+-+    return rezultat
+-+
+-+
+- def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
+-     """
+-     Rulează o funcție din registru în siguranță, cu truncare automată
+-@@ -204,6 +221,7 @@ def ruleaza_functie(nume_functie: str, argumente: dict) -> dict:
+- 
+-     try:
+-         functie = REGISTRU_FUNCTII[nume_functie]
+-+        argumente = _normalizeaza_argumente(nume_functie, argumente)
+-         rezultat = functie(**argumente) if argumente else functie()
+- 
+-         # Truncăm outputul dacă unealta are max_linii setat
+-diff --git a/src/core/security.py b/src/core/security.py
+-index 901ed74..4567310 100644
+---- a/src/core/security.py
+-+++ b/src/core/security.py
+-@@ -21,6 +21,7 @@ Când implementezi Faza 3, caută comentariul "FAZA 3:" din această clasă
+- 
+- import re
+- import sys
+-+import threading
+- from enum import Enum
+- from src.core.git_safety import creeaza_checkpoint
+- 
+-@@ -32,6 +33,29 @@ class ConfirmationMode(Enum):
+- 
+- CONFIRMATION_MODE = ConfirmationMode.TEXT
+- 
+-+# Canal de confirmare PER THREAD: bucla vocală (alt thread decât bucla text) își înregistrează aici
+-+# confirmarea vorbită, iar bucla text rămâne pe terminal. Uneltele rulează în același thread cu tura
+-+# care le-a cerut (inclusiv sub-agenții), deci thread-local e suficient.
+-+_canal = threading.local()
+-+
+-+
+-+class canal_confirmare:
+-+    """Context manager: `with canal_confirmare(fn): ...` — în blocul respectiv, cere_confirmare
+-+    apelează fn(nume_functie, argumente) -> bool în locul input()."""
+-+
+-+    def __init__(self, functie):
+-+        self._functie = functie
+-+        self._anterior = None
+-+
+-+    def __enter__(self):
+-+        self._anterior = getattr(_canal, "functie", None)
+-+        _canal.functie = self._functie
+-+        return self
+-+
+-+    def __exit__(self, *exc):
+-+        _canal.functie = self._anterior
+-+        return False
+-+
+- 
+- # ---- Pattern-uri blocate complet (blacklist) ----
+- # Dacă vreun argument al unui apel de funcție conține unul din aceste
+-@@ -143,6 +167,16 @@ def cere_confirmare(nume_functie: str, argumente: dict) -> bool:
+-         f"    Această acțiune necesită confirmare. Aprobi? "
+-     )
+- 
+-+    # Canal înregistrat pentru thread-ul curent (ex: bucla vocală) are prioritate.
+-+    functie_canal = getattr(_canal, "functie", None)
+-+    if functie_canal is not None:
+-+        print(mesaj)
+-+        try:
+-+            return bool(functie_canal(nume_functie, argumente))
+-+        except Exception as e:
+-+            print(f"[Securitate] Canalul de confirmare a eșuat ({e}) — acțiune refuzată.")
+-+            return False
+-+
+-     if CONFIRMATION_MODE == ConfirmationMode.TEXT:
+-         return _confirmare_text(mesaj)
+- 
+-diff --git a/src/core/stare_conversatie.py b/src/core/stare_conversatie.py
+-index 737a965..5a0010d 100644
+---- a/src/core/stare_conversatie.py
+-+++ b/src/core/stare_conversatie.py
+-@@ -19,4 +19,10 @@ vorbească, ca să nu se suprapună niciodată peste o tură de conversație.
+- 
+- import threading
+- 
+--conversatie_activa = threading.Event()
+-\ No newline at end of file
+-+conversatie_activa = threading.Event()
+-+
+-+# FIX: `istoric` e o listă partajată între bucla text (main.py) și bucla vocală
+-+# (audio_loop.py, rulată pe thread separat în modurile [1] și [3]). Fără lock,
+-+# două ture concurente intercalau mesaje user/function_call/function_response
+-+# și corupeau istoricul (-> 400 de la Gemini). Fiecare tură ia lock-ul pe toată durata ei.
+-+lock_istoric = threading.RLock()
+-diff --git a/src/core/subagenti.py b/src/core/subagenti.py
+-index 83b57a1..99cb864 100644
+---- a/src/core/subagenti.py
+-+++ b/src/core/subagenti.py
+-@@ -53,7 +53,9 @@ _ERORI_FALLBACK = (403, 429, 500, 502, 503, 504)
+- _MARCAJE_TEMPORARE = ("UNAVAILABLE", "RESOURCE_EXHAUSTED", "OVERLOADED", "DEADLINE_EXCEEDED")
+- try:
+-     import httpx
+--    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)
+-+    # FIX: aliniat cu main.py — înainte lipseau ReadError, WriteTimeout, PoolTimeout, deci o cădere
+-+    # de rețea de acest tip întorcea „Eroare în sub-agent" în loc să încerce cheia următoare.
+-+    _EXCEPTII_RETEA = (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)
+- except ImportError:
+-     _EXCEPTII_RETEA = ()
+- 
+-diff --git a/src/core/wake_word.py b/src/core/wake_word.py
+-index 34ce852..ffe9f2b 100644
+---- a/src/core/wake_word.py
+-+++ b/src/core/wake_word.py
+-@@ -104,6 +104,7 @@ def porneste_cu_wake_word(
+-     istoric: list | None = None,
+-     rotatie_clienti=None,
+-     model_gemini: str = "gemini-3.6-flash",
+-+    sesiune_id: str | None = None,
+- ) -> None:
+-     """
+-     Buclă permanentă: ascultă pasiv → detectează → conversație → repeat.
+-@@ -156,6 +157,7 @@ def porneste_cu_wake_word(
+-                 istoric=istoric,
+-                 rotatie_clienti=rotatie_clienti,
+-                 model=model_gemini,
+-+                sesiune_id=sesiune_id,
+-             )
+- 
+-             print("\n[Revin la ascultarea pasivă...]\n")
+-diff --git a/src/tools/calendar_google.py b/src/tools/calendar_google.py
+-index b694a50..7f20b8f 100644
+---- a/src/tools/calendar_google.py
+-+++ b/src/tools/calendar_google.py
+-@@ -117,7 +117,12 @@ def evenimente_viitoare(numar: int = 10):
+-         return _mesaj_lipsa_config()
+- 
+-     try:
+--        acum = datetime.datetime.utcnow().isoformat() + "Z"
+-+        # FIX: utcnow() e deprecat; numar poate veni ca float (5.0) -> API-ul respinge maxResults
+-+        acum = datetime.datetime.now(datetime.timezone.utc).isoformat()
+-+        try:
+-+            numar = max(1, min(int(numar), 100))
+-+        except (TypeError, ValueError):
+-+            numar = 10
+-         rezultat = (
+-             service.events()
+-             .list(
+-diff --git a/src/tools/control_ecran.py b/src/tools/control_ecran.py
+-index 57a5661..8ee29c4 100644
+---- a/src/tools/control_ecran.py
+-+++ b/src/tools/control_ecran.py
+-@@ -181,6 +181,10 @@ def apasa_tasta(tasta: str):
+-         parti = [p.strip() for p in tasta.lower().split("+") if p.strip()]
+-         if not parti:
+-             return "Nicio tastă specificată."
+-+        # FIX: pyautogui ignoră tăcut tastele necunoscute, iar funcția raporta „Tastă apăsată".
+-+        necunoscute = [p for p in parti if p not in pyautogui.KEYBOARD_KEYS]
+-+        if necunoscute:
+-+            return f"Tastă necunoscută: {', '.join(necunoscute)}. Folosește nume pyautogui (ex: 'enter', 'ctrl', 'esc')."
+-         if len(parti) > 1:
+-             pyautogui.hotkey(*parti)
+-         else:
+-diff --git a/src/tools/developer.py b/src/tools/developer.py
+-index 7da5f44..c9a61b7 100644
+---- a/src/tools/developer.py
+-+++ b/src/tools/developer.py
+-@@ -47,11 +47,14 @@ _server_proc: "subprocess.Popen | None" = None  # păstrat ca să putem face pol
+- )
+- def deschide_vscode(cale: str = "."):
+-     """Deschide VS Code la calea specificată."""
+--    cale = cale.strip() or "."
+-+    cale = (cale or "").strip() or "."
+-+    # FIX: o cale care începe cu '-' ar fi interpretată de `code` ca opțiune (--install-extension etc.)
+-+    if cale.startswith("-"):
+-+        return f"Cale invalidă: '{cale}' nu poate începe cu '-'."
+- 
+-     try:
+-         subprocess.Popen(
+--            ["code", cale],
+-+            ["code", "--", cale],
+-             stdout=subprocess.DEVNULL,
+-             stderr=subprocess.DEVNULL,
+-         )
+-@@ -125,7 +128,9 @@ def porneste_server_http(port: int = 8000, folder: str = "."):
+-         # FIX: "python" nu există pe multe sisteme (doar "python3");
+-         # sys.executable e interpretorul care rulează deja Jarvis.
+-         proces = subprocess.Popen(
+--            [sys.executable, "-m", "http.server", str(port), "--directory", folder],
+-+            # FIX: fără --bind, http.server ascultă pe TOATE interfețele (0.0.0.0): folderul
+-+            # (implicit chiar rădăcina proiectului, cu .env) devenea vizibil oricui din rețeaua locală.
+-+            [sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1", "--directory", folder],
+-             stdout=subprocess.DEVNULL,
+-             stderr=subprocess.DEVNULL,
+-         )
+-@@ -168,6 +173,7 @@ def opreste_server_http():
+-                 _server_proc.wait(timeout=3)   # recoltăm procesul, fără zombie
+-             except subprocess.TimeoutExpired:
+-                 _server_proc.kill()
+-+                _server_proc.wait(timeout=3)  # FIX: fără wait() rămânea proces zombie
+-         elif _server_proc is None:
+-             os.kill(_server_pid, signal.SIGTERM)
+-         _server_pid = None
+-@@ -276,6 +282,11 @@ def git_status(cale_repo: str = "."):
+-     max_linii=40,
+- )
+- def git_log(numar: int = 10, cale_repo: str = "."):
+-+    # FIX: Gemini poate trimite 5.0 -> `--max-count=5.0` e respins de git
+-+    try:
+-+        numar = max(1, min(int(numar), 200))
+-+    except (TypeError, ValueError):
+-+        numar = 10
+-     return _ruleaza_git(
+-         ["log", f"--max-count={numar}", "--oneline", "--decorate"],
+-         cale_repo
+-diff --git a/src/tools/external.py b/src/tools/external.py
+-index 3aba9c6..16c48a2 100644
+---- a/src/tools/external.py
+-+++ b/src/tools/external.py
+-@@ -33,6 +33,9 @@ _COD_VREME = {
+-     1: "în general senin", 2: "parțial înnorat", 3: "înnorat",
+-     45: "ceață", 48: "ceață cu chiciură",
+-     51: "burniță ușoară", 53: "burniță moderată", 55: "burniță densă",
+-+    56: "burniță înghețată ușoară", 57: "burniță înghețată densă",
+-+    66: "ploaie înghețată ușoară", 67: "ploaie înghețată puternică",
+-+    77: "fulgi de zăpadă", 85: "averse de ninsoare ușoare", 86: "averse de ninsoare puternice",
+-     61: "ploaie ușoară", 63: "ploaie moderată", 65: "ploaie puternică",
+-     71: "ninsoare ușoară", 73: "ninsoare moderată", 75: "ninsoare puternică",
+-     80: "averse ușoare", 81: "averse moderate", 82: "averse violente",
+-diff --git a/src/tools/hardware.py b/src/tools/hardware.py
+-index e38398b..3082e69 100644
+---- a/src/tools/hardware.py
+-+++ b/src/tools/hardware.py
+-@@ -275,7 +275,9 @@ def comuta_mute(activeaza_mute: str):
+- )
+- def seteaza_luminozitate(procent: int):
+-     """Setează luminozitatea ecranului prin brightnessctl."""
+--    procent = max(0, min(100, int(procent)))  # clamp în interval valid
+-+    # FIX: 0% stinge complet iluminarea ecranului pe multe laptopuri (ecran negru, greu de
+-+    # revenit doar cu vocea). Minimul real e 1%.
+-+    procent = max(1, min(100, int(procent)))
+- 
+-     try:
+-         subprocess.run(
+-diff --git a/src/tools/joburi.py b/src/tools/joburi.py
+-index 9236e37..59602e1 100644
+---- a/src/tools/joburi.py
+-+++ b/src/tools/joburi.py
+-@@ -5,6 +5,7 @@ Expune JobManager din core/jobs.py către Gemini. Util pentru comenzi care
+- durează mult — build-uri, download-uri mari, compilări, sincronizări etc.
+- """
+- 
+-+import shlex
+- from src.core.registry import unealta
+- from src.core.jobs import manager_joburi
+- 
+-@@ -41,7 +42,11 @@ from src.core.jobs import manager_joburi
+- )
+- def porneste_job_fundal(comanda: str, descriere: str, director: str = "."):
+-     """Pornește o comandă lungă într-un thread separat și returnează ID-ul jobului."""
+--    parti_comanda = comanda.split()
+-+    # FIX: .split() rupea argumentele cu ghilimele (git commit -m "a b"); shlex le respectă.
+-+    try:
+-+        parti_comanda = shlex.split(comanda)
+-+    except ValueError as e:
+-+        return f"Comandă invalidă ({e})."
+- 
+-     if not parti_comanda:
+-         return "Comanda e goală, nu am ce rula."
+-diff --git a/src/tools/sistem.py b/src/tools/sistem.py
+-index 9614cd0..178687b 100644
+---- a/src/tools/sistem.py
+-+++ b/src/tools/sistem.py
+-@@ -29,7 +29,9 @@ ALIAS_COMENZI = {
+-     "lista_fisiere": ["ls", "-la"],
+-     "spatiu_disc": ["df", "-h"],
+-     "memorie_ram": ["free", "-h"],
+--    "procese_active": ["ps", "aux"],
+-+    # FIX: `ps aux` e sortat după PID; cu max_linii=35 se vedeau doar procesele vechi (systemd,
+-+    # kthreadd), nu cele care consumă CPU. Sortăm descrescător după CPU.
+-+    "procese_active": ["ps", "aux", "--sort=-%cpu"],
+-     "timp_functionare": ["uptime"],
+-     "utilizator_curent": ["whoami"],
+-     "director_curent": ["pwd"],
+-diff --git a/src/ui/server.py b/src/ui/server.py
+-index 6dbcec2..43abb3e 100644
+---- a/src/ui/server.py
+-+++ b/src/ui/server.py
+-@@ -79,6 +79,10 @@ SYSTEM_PROMPT = memorie.construieste_system_prompt(SYSTEM_PROMPT_BAZA)
+- 
+- conexiuni_active: list[WebSocket] = []
+- 
+-+# FIX: sesiunea creată la import nu se marca niciodată închisă (main.py o face).
+-+import atexit
+-+atexit.register(lambda: db.inchide_sesiune(sesiune_id))
+-+
+- # ── App ───────────────────────────────────────────────────────────────────────
+- 
+- app = FastAPI(title="Jarvis UI")
+-@@ -97,9 +101,22 @@ async def broadcast(mesaj: dict):
+-             conexiuni_active.remove(ws)
+- 
+- 
+--def _e_eroare_de_fallback(mesaj_err: str) -> bool:
+-+def _e_eroare_de_fallback(eroare) -> bool:
+-     # FIX: înainte `str(c) in mesaj_err` potrivea "500" oriunde în text
+-     # (ex: "8500 tokens"). Acum doar cod de sine stătător.
+-+    # FIX 2: acceptă și excepția în sine — erorile de rețea (httpx) și atributul .code nu
+-+    # aveau cod în text, deci UI-ul nu încerca cheia următoare (spre deosebire de main.py).
+-+    try:
+-+        import httpx
+-+        if isinstance(eroare, (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError, httpx.TimeoutException)):
+-+            return True
+-+    except ImportError:
+-+        pass
+-+    for atribut in ("code", "status_code"):
+-+        cod = getattr(eroare, atribut, None)
+-+        if isinstance(cod, int) and cod in ERORI_FALLBACK:
+-+            return True
+-+    mesaj_err = str(eroare)
+-     return any(re.search(rf"(?<!\d){c}(?!\d)", mesaj_err) for c in ERORI_FALLBACK)
+- 
+- 
+-@@ -137,7 +154,7 @@ def _ruleaza_agent_blocat(mesaj_user: str) -> str:
+-             try:
+-                 raspuns = agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
+-             except Exception as e:
+--                if _e_eroare_de_fallback(str(e)):
+-+                if _e_eroare_de_fallback(e):
+-                     time.sleep(0.5)
+-                     continue
+-                 raise
+-@@ -232,7 +249,13 @@ async def websocket_endpoint(ws: WebSocket):
+-     try:
+-         while True:
+-             data    = await ws.receive_text()
+--            payload = json.loads(data)
+-+            # FIX: un mesaj JSON invalid (sau non-obiect) arunca excepție -> conexiunea cădea.
+-+            try:
+-+                payload = json.loads(data)
+-+            except json.JSONDecodeError:
+-+                continue
+-+            if not isinstance(payload, dict):
+-+                continue
+-             tip     = payload.get("tip", "")
+- 
+-             if tip == "ping":
+-@@ -246,7 +269,7 @@ async def websocket_endpoint(ws: WebSocket):
+- 
+-                 await broadcast({"tip": "status", "stare": "thinking"})
+- 
+--                loop = asyncio.get_event_loop()
+-+                loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
+-                 try:
+-                     raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
+-                 except Exception as e:
+-@@ -255,10 +278,18 @@ async def websocket_endpoint(ws: WebSocket):
+-                     await broadcast({"tip": "status", "stare": "idle"})
+-                     continue
+- 
+--                db.salveaza_mesaj(sesiune_id, "user", text_user)
+--                db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+--                rag.indexeaza_mesaj("user", text_user, sesiune_id)
+--                rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+-+                # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
+-+                # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
+-+                def _persista():
+-+                    db.salveaza_mesaj(sesiune_id, "user", text_user)
+-+                    db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+-+                    rag.indexeaza_mesaj("user", text_user, sesiune_id)
+-+                    rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+-+
+-+                try:
+-+                    await loop.run_in_executor(None, _persista)
+-+                except Exception as e:
+-+                    print(f"[Memorie] Salvare/indexare eșuată: {e}")
+- 
+-                 await broadcast({
+-                     "tip":    "raspuns",
+-diff --git a/src/ui/static/index.html b/src/ui/static/index.html
+-index cf42b1e..8de4571 100644
+---- a/src/ui/static/index.html
+-+++ b/src/ui/static/index.html
+-@@ -650,6 +650,7 @@ function connect() {
+-   };
+- 
+-   ws.onclose = () => {
+-+    removeThinking();
+-     setState('offline');
+-     document.getElementById('conn-dot').style.background = 'var(--red)';
+-     document.getElementById('conn-dot').style.boxShadow = '0 0 10px var(--red)';
+-@@ -660,6 +661,17 @@ function connect() {
+-   ws.onerror = () => ws.close();
+- }
+- 
+-+// FIX: marked/DOMPurify vin de pe CDN; offline (sau CDN blocat) addJarvis() arunca ReferenceError,
+-+// răspunsul nu se afișa și butonul rămânea blocat pe „thinking". Fallback: text simplu, escapat.
+-+function randeazaMarkdown(text) {
+-+  try {
+-+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+-+      return DOMPurify.sanitize(marked.parse(text));
+-+    }
+-+  } catch (e) {}
+-+  return esc(String(text)).replace(/\n/g, '<br>');
+-+}
+-+
+- // ── Chat ───────────────────────────────────────────────────────────────────
+- function removeWelcome() {
+-   const w = document.getElementById('welcome');
+-@@ -679,7 +691,7 @@ function addJarvis(text) {
+-   removeWelcome();
+-   const wrap = document.createElement('div');
+-   wrap.className = 'msg-wrap jarvis';
+--  wrap.innerHTML = `<div class="msg-label">JARVIS</div><div class="msg-bubble">${DOMPurify.sanitize(marked.parse(text))}</div>`;
+-+  wrap.innerHTML = `<div class="msg-label">JARVIS</div><div class="msg-bubble">${randeazaMarkdown(text)}</div>`;
+-   document.getElementById('messages').appendChild(wrap);
+-   scrollBottom();
+- }
+-@@ -710,7 +722,8 @@ function esc(t) {
+- function trimite() {
+-   const inp = document.getElementById('chat-input');
+-   const txt = inp.value.trim();
+--  if (!txt || !ws || ws.readyState !== WebSocket.OPEN) return;
+-+  if (!txt) return;
+-+  if (!ws || ws.readyState !== WebSocket.OPEN) { log('Nu sunt conectat la Jarvis — mesajul nu a fost trimis.', 'warn'); return; }
+-   addUser(txt);
+-   showThinking();
+-   setState('thinking');
+-@@ -733,7 +746,7 @@ function log(msg, type='info') {
+-   const t = new Date().toLocaleTimeString('ro',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+-   const d = document.createElement('div');
+-   d.className = 'log-item';
+--  d.innerHTML = `<span class="log-time">${t}</span><span class="log-msg-${type}">${msg}</span>`;
+-+  d.innerHTML = `<span class="log-time">${t}</span><span class="log-msg-${type}">${esc(String(msg))}</span>`;
+-   el.insertBefore(d, el.firstChild);
+-   if (el.children.length > 40) el.lastChild.remove();
+- }
+-diff --git a/src/ui/static/index_desktop.html b/src/ui/static/index_desktop.html
+-index 61def3c..8a9a6b1 100644
+---- a/src/ui/static/index_desktop.html
+-+++ b/src/ui/static/index_desktop.html
+-@@ -419,6 +419,7 @@ function connect() {
+-     }
+-   };
+-   ws.onclose = () => {
+-+    removeThinking();
+-     wSetState('offline');
+-     document.getElementById('w-conn').style.background = 'var(--red)';
+-     retry = setTimeout(connect, 3000);
+-@@ -426,6 +427,17 @@ function connect() {
+-   ws.onerror = () => ws.close();
+- }
+- 
+-+// FIX: marked/DOMPurify vin de pe CDN; offline (sau CDN blocat) addJarvis() arunca ReferenceError,
+-+// răspunsul nu se afișa și butonul rămânea blocat pe „thinking". Fallback: text simplu, escapat.
+-+function randeazaMarkdown(text) {
+-+  try {
+-+    if (typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+-+      return DOMPurify.sanitize(marked.parse(text));
+-+    }
+-+  } catch (e) {}
+-+  return esc(String(text)).replace(/\n/g, '<br>');
+-+}
+-+
+- // ── Chat ───────────────────────────────────────────────────────────────────
+- function esc(t) { return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+- 
+-@@ -444,7 +456,7 @@ function addJarvis(text) {
+-   if (w) w.remove();
+-   const d = document.createElement('div');
+-   d.className = 'w-msg jarvis';
+--  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${DOMPurify.sanitize(marked.parse(text))}</div>`;
+-+  d.innerHTML = `<div class="w-label">JARVIS</div><div class="w-bubble">${randeazaMarkdown(text)}</div>`;
+-   document.getElementById('w-messages').appendChild(d);
+-   scroll();
+- }
+-diff --git a/tests/test_regresii.py b/tests/test_regresii.py
+-new file mode 100644
+-index 0000000..aec9ba6
+---- /dev/null
+-+++ b/tests/test_regresii.py
+-@@ -0,0 +1,91 @@
+-+"""
+-+Teste de regresie pentru bug-urile corectate în rundele de revizuire.
+-+Rulează fără microfon, rețea sau chei API:  python -m pytest tests -q
+-+"""
+-+import threading
+-+
+-+import pytest
+-+
+-+from src.core import security
+-+from src.core.confirmare_vocala import interpreteaza_raspuns
+-+from src.core.router import clasifica
+-+
+-+
+-+# ── security: blacklist rm (bypass cu -vrf / -v -rf) ─────────────────────────
+-+@pytest.mark.parametrize("comanda", [
+-+    "rm -rf /", "rm -vrf x", "rm -v -rf x", "rm -iR d", "rm -f a", "/bin/rm -rf x",
+-+])
+-+def test_blacklist_blocheaza_rm_periculos(comanda):
+-+    ok, _ = security.verifica_blacklist("ruleaza_comanda", {"comanda": comanda})
+-+    assert ok is False
+-+
+-+
+-+@pytest.mark.parametrize("comanda", ["rm file.txt", "rm -v file", "confirm -f", "perform -rf"])
+-+def test_blacklist_lasa_comenzi_inofensive(comanda):
+-+    ok, _ = security.verifica_blacklist("ruleaza_comanda", {"comanda": comanda})
+-+    assert ok is True
+-+
+-+
+-+# ── confirmare vocală ────────────────────────────────────────────────────────
+-+@pytest.mark.parametrize("text,asteptat", [
+-+    ("Da.", True), ("da, te rog", True), ("Fă-o!", True), ("Desigur, execută", True),
+-+    ("Nu", False), ("nu, stop", False), ("anulează", False),
+-+    ("Da, dar nu acum", False),            # negația bate afirmația
+-+    ("", None), ("poate", None),
+-+    ("da da da da da da da da da da", None),  # prea lung = neclar
+-+])
+-+def test_interpretare_raspuns_vocal(text, asteptat):
+-+    assert interpreteaza_raspuns(text) is asteptat
+-+
+-+
+-+def test_canal_confirmare_este_per_thread():
+-+    rezultate = {}
+-+
+-+    def in_thread():
+-+        with security.canal_confirmare(lambda n, a: True):
+-+            rezultate["voce"] = security.cere_confirmare("f", {})
+-+
+-+    t = threading.Thread(target=in_thread)
+-+    t.start(); t.join()
+-+    # thread-ul principal nu are canal și (în pytest) nici terminal: fail closed
+-+    rezultate["text"] = security.cere_confirmare("f", {})
+-+    assert rezultate == {"voce": True, "text": False}
+-+
+-+
+-+def test_canal_confirmare_cu_eroare_refuza():
+-+    def stricat(n, a):
+-+        raise RuntimeError("microfon")
+-+
+-+    with security.canal_confirmare(stricat):
+-+        assert security.cere_confirmare("f", {}) is False
+-+
+-+
+-+# ── registry: INTEGER primit ca float ────────────────────────────────────────
+-+def test_registry_converteste_float_intreg():
+-+    from src.core.registry import unealta, ruleaza_functie
+-+
+-+    @unealta(description="test", parameters={"n": {"type": "INTEGER", "description": "n"}})
+-+    def _tip_n(n):
+-+        return type(n).__name__
+-+
+-+    assert ruleaza_functie("_tip_n", {"n": 5.0})["rezultat"] == "int"
+-+    assert ruleaza_functie("_tip_n", {"n": 5.5})["rezultat"] == "float"  # nu strică valorile reale
+-+
+-+
+-+# ── database: același fapt nu se mai dublează ────────────────────────────────
+-+def test_memorie_upsert_nu_dubleaza(tmp_path):
+-+    from src.core.database import JarvisDB
+-+
+-+    db = JarvisDB(tmp_path / "t.db")
+-+    a = db.salveaza_memorie("fapt", "Vasea lucrează la Jarvis", "s1", 0.6)
+-+    b = db.salveaza_memorie("fapt", "  vasea lucrează la jarvis ", "s2", 1.0)
+-+    c = db.salveaza_memorie("preferinta", "Vasea lucrează la Jarvis", "s2", 1.0)
+-+    assert a == b and a != c
+-+    fapte = db.cauta_memorie(tip="fapt")
+-+    assert len(fapte) == 1 and fapte[0]["relevanta"] == 1.0
+-+
+-+
+-+# ── router ───────────────────────────────────────────────────────────────────
+-+def test_router_clasifica_categorii_de_baza():
+-+    assert clasifica("deschide firefox") == "unelte"
+-+    assert clasifica("salut, ce mai faci?") == "conversatie"
+diff --git a/main.py b/main.py
+index 4fecf54..8e4dd2d 100644
+--- a/main.py
++++ b/main.py
+@@ -55,9 +55,15 @@ class _RotatieSigura:
+     """
+ 
+     def __init__(self, elemente):
++        elemente = list(elemente)
++        self._n = len(elemente)
+         self._ciclu = itertools.cycle(elemente)
+         self._lock = threading.Lock()
+ 
++    def __len__(self):
++        # Folosit de modulele vocale ca să știe câte chei să încerce înainte să renunțe.
++        return self._n
++
+     def __iter__(self):
+         return self
+ 
+@@ -180,7 +186,7 @@ def groq_fallback(istoric: list, system_prompt: str) -> str:
+     raspuns = groq_client.chat.completions.create(
+         model=GROQ_MODEL,
+         messages=mesaje,
+-        max_tokens=1024,
++        max_tokens=4096,  # FIX: 1024 tăia răspunsurile lungi
+     )
+     # FIX: content poate fi None (ex. răspuns blocat) -> returnam sir gol
+     # in loc de None, ca sa nu crape mai departe la print/DB/RAG.
+@@ -606,7 +612,12 @@ def main():
+     threading.Thread(target=_bucla_alerte, daemon=True).start()
+ 
+     porneste_thread_watcher()
+-    porneste_monitorizare_ecran(_la_schimbare_ecran)
++    # FIX: monitorul de ecran pornea mereu și nu putea fi oprit; trimite periodic screenshot-uri
++    # întregi către un API extern (cotă + confidențialitate). JARVIS_MONITOR_ECRAN=0 îl dezactivează.
++    if os.getenv("JARVIS_MONITOR_ECRAN", "1").strip().lower() not in ("0", "false", "nu", "off", "no"):
++        porneste_monitorizare_ecran(_la_schimbare_ecran)
++    else:
++        print("[Monitor Ecran] Dezactivat din .env (JARVIS_MONITOR_ECRAN=0).")
+     porneste_monitorizare_log(_la_eroare_log)
+     istoric = []
+     sesiune_id = db.incepe_sesiune()
+@@ -635,7 +646,13 @@ def main():
+         return
+ 
+     if alegere in ("2", "voce"):
+-        from src.core.wake_word import porneste_cu_wake_word
++        # FIX: importul crăpa cu traceback dacă lipseau sounddevice / openwakeword.
++        try:
++            from src.core.wake_word import porneste_cu_wake_word
++        except Exception as e:
++            print(f"[Voce] Modul vocal indisponibil (dependențe audio lipsă?): {e}")
++            db.inchide_sesiune(sesiune_id)
++            return
+         try:
+             porneste_cu_wake_word(
+                 istoric=istoric,
+@@ -650,24 +667,12 @@ def main():
+             db.inchide_sesiune(sesiune_id)
+ 
+     elif alegere in ("3", "ambele"):
+-        from src.core.wake_word import porneste_cu_wake_word
+-
+-        threading.Thread(
+-            target=porneste_cu_wake_word,
+-            kwargs={
+-                "istoric": istoric,
+-                "rotatie_clienti": _gemini_rotatie,
+-                "model_gemini": GEMINI_MODEL,
+-                "sesiune_id": sesiune_id,
+-            },
+-            daemon=True,
+-        ).start()
+-        print("[Modul vocal pornit în fundal. Poți folosi și terminalul.]\n")
++        # FIX: folosește helper-ul tolerant (nu mai crapă dacă lipsesc dependențele audio).
++        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
+         bucla_text(istoric, sesiune_id, system_prompt)
+ 
+     else:
+-        # Modul implicit [1]: text în terminal + ascultare pasivă în fundal (Task 6.8).
+-        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
++        # FIX: modul [1] era identic cu [3] (pornea și microfonul), deși e „doar text".
+         bucla_text(istoric, sesiune_id, system_prompt)
+ 
+ 
+diff --git a/src/core/audio_loop.py b/src/core/audio_loop.py
+index a2451a9..5cd2f7c 100644
+--- a/src/core/audio_loop.py
++++ b/src/core/audio_loop.py
+@@ -92,8 +92,78 @@ def _obtine_client_gemini():
+         )
+ 
+     clienti = [genai.Client(api_key=k) for k in chei]
+-    rotatie = itertools.cycle(clienti)
+-    return rotatie
++    return _RotatieClienti(clienti)
++
++
++class _RotatieClienti:
++    """Iterator ciclic peste clienți, cu __len__ (câte chei avem) și lock pentru thread-uri."""
++
++    def __init__(self, clienti):
++        self._n = len(clienti)
++        self._ciclu = itertools.cycle(clienti)
++        self._lock = threading.Lock()
++
++    def __len__(self):
++        return self._n
++
++    def __iter__(self):
++        return self
++
++    def __next__(self):
++        with self._lock:
++            return next(self._ciclu)
++
++
++# Câte secunde de inactivitate (fără vorbire utilă) până revenim la ascultarea pasivă („Hey Jarvis").
++TIMEOUT_INACTIVITATE_SECUNDE = float(os.getenv("JARVIS_VOICE_IDLE_SECONDS", "30"))
++
++_COD_TEMPORAR = (503, 429, 500, 502, 504, 403)
++
++
++def _e_eroare_temporara(e: Exception) -> bool:
++    """Eșec temporar al cheii curente (limită/indisponibilitate) -> merită cheia următoare."""
++    for atribut in ("code", "status_code"):
++        cod = getattr(e, atribut, None)
++        if isinstance(cod, int) and cod in _COD_TEMPORAR:
++            return True
++    mesaj = str(e)
++    if any(re.search(rf"(?<!\d){c}(?!\d)", mesaj) for c in _COD_TEMPORAR):
++        return True
++    return any(m in mesaj.upper() for m in ("RESOURCE_EXHAUSTED", "UNAVAILABLE", "OVERLOADED", "TIMEOUT", "TIMED OUT"))
++
++
++def _agent_streaming_cu_fallback_chei(
++    rotatie_clienti, model, prompt, istoric, lungime_inainte, la_propozitie, flag_intrerupere,
++):
++    """
++    FIX: pe calea „unelte" se făcea un singur next(rotatie_clienti); dacă acea cheie dădea
++    429/503, auzeai „am întâmpinat o eroare", deși modul text încearcă toate cheile.
++    Încearcă fiecare cheie o dată. Nu reîncearcă dacă s-a rostit deja ceva (ar repeta vocea).
++    """
++    incercari = max(1, len(rotatie_clienti)) if hasattr(rotatie_clienti, "__len__") else 3
++    rostit = []
++
++    def _la_propozitie_marcata(propozitie):
++        rostit.append(True)
++        la_propozitie(propozitie)
++
++    ultima = None
++    for _ in range(incercari):
++        client = next(rotatie_clienti)
++        try:
++            return agent_loop_streaming(
++                client, model, prompt, istoric,
++                la_propozitie_gata=_la_propozitie_marcata,
++                flag_intrerupere=flag_intrerupere,
++            )
++        except Exception as e:
++            if rostit or not _e_eroare_temporara(e):
++                raise
++            ultima = e
++            print(f"[Cheie Gemini indisponibilă ({str(e)[:80]}) — încerc următoarea]")
++            del istoric[lungime_inainte + 1:]  # păstrăm doar mesajul utilizatorului
++            time.sleep(0.5)
++    raise ultima
+ 
+ 
+ # System prompt separat pentru NVIDIA (conversație/cod, FĂRĂ unelte reale) —
+@@ -249,6 +319,14 @@ def _porneste_bucla_audio_interna(
+     print("  Spune 'exit' sau 'stop' pentru a ieși.")
+     print("═" * 50 + "\n")
+ 
++    # FIX: după „Hey Jarvis" bucla rămânea deschisă la nesfârșit (răspundea la TV, alte persoane).
++    # Dacă nu există vorbire utilă TIMEOUT_INACTIVITATE_SECUNDE, ieșim -> wake_word.py revine
++    # la ascultarea pasivă.
++    ultima_activitate = time.monotonic()
++
++    def _inactiv_prea_mult() -> bool:
++        return (time.monotonic() - ultima_activitate) >= TIMEOUT_INACTIVITATE_SECUNDE
++
+     while True:
+         # ── Pasul 1: VAD — așteptăm să vorbești ──────────────────────────
+         print(INDICATOR["ascult"])
+@@ -256,6 +334,9 @@ def _porneste_bucla_audio_interna(
+ 
+         if audio is None:
+             # Timeout de siguranță din VAD — nu s-a detectat nicio vorbire
++            if _inactiv_prea_mult():
++                print("[Voce] Inactivitate — revin la ascultarea pasivă.")
++                break
+             continue
+ 
+         # ── Pasul 2: STT — transcriem ce ai spus ─────────────────────────
+@@ -264,6 +345,9 @@ def _porneste_bucla_audio_interna(
+ 
+         if not text_utilizator.strip():
+             print("[Transcriere goală — poate zgomot de fundal, reiau ascultarea]")
++            if _inactiv_prea_mult():
++                print("[Voce] Inactivitate — revin la ascultarea pasivă.")
++                break
+             continue
+ 
+         print(f"Tu (vocal): {text_utilizator}")
+@@ -346,11 +430,9 @@ def _porneste_bucla_audio_interna(
+                 if categorie == "unelte":
+                     # Singura cale cu tool-calling real — Gemini, streaming nativ.
+                     try:
+-                        client_curent = next(rotatie_clienti)
+-                        raspuns_final = agent_loop_streaming(
+-                            client_curent, model, prompt_tura, istoric,
+-                            la_propozitie_gata=_la_propozitie,
+-                            flag_intrerupere=flag_intrerupere,
++                        raspuns_final = _agent_streaming_cu_fallback_chei(
++                            rotatie_clienti, model, prompt_tura, istoric, lungime_inainte,
++                            _la_propozitie, flag_intrerupere,
+                         )
+                     except Exception as e:
+                         eroare_de_afisat = e
+@@ -376,11 +458,9 @@ def _porneste_bucla_audio_interna(
+                         print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")
+                         _ultima_categorie_vocal = "unelte"
+                         try:
+-                            client_curent = next(rotatie_clienti)
+-                            raspuns_final = agent_loop_streaming(
+-                                client_curent, model, prompt_tura, istoric,
+-                                la_propozitie_gata=_la_propozitie,
+-                                flag_intrerupere=flag_intrerupere,
++                            raspuns_final = _agent_streaming_cu_fallback_chei(
++                                rotatie_clienti, model, prompt_tura, istoric, lungime_inainte,
++                                _la_propozitie, flag_intrerupere,
+                             )
+                         except Exception as e:
+                             eroare_de_afisat = e
+@@ -419,6 +499,8 @@ def _porneste_bucla_audio_interna(
+                 daemon=True,
+             ).start()
+ 
++        ultima_activitate = time.monotonic()  # tura s-a încheiat -> reîncepe numărătoarea inactivității
++
+         if flag_intrerupere.is_set():
+             print("[Barge-in] Revin imediat la ascultare — spune ce ai de spus.")
+             # Fără pauză aici — vrem să captăm cât mai repede ce spune Vasea,
+diff --git a/src/core/git_safety.py b/src/core/git_safety.py
+index 2e833d8..1adf598 100644
+--- a/src/core/git_safety.py
++++ b/src/core/git_safety.py
+@@ -7,85 +7,113 @@ calendar, click/tastare pe ecran etc.), creăm un checkpoint local Git,
+ NEINTRUZIV, care nu modifică branch-ul activ, nu murdărește `git log`
+ și nu deranjează working tree-ul vizibil.
+ 
+-Mecanism: `git stash create` — construiește un obiect de commit care
+-conține exact starea curentă (staged + unstaged), FĂRĂ să atingă
+-indexul sau working tree-ul (spre deosebire de `git stash push`, care
+-le-ar goli). Obiectul rezultat e "orfan" (nu apare în `git log` normal),
+-dar poate fi recuperat oricând cu hash-ul lui.
++Mecanism: se construiește un commit dintr-un index TEMPORAR care conține starea
++curentă completă (tracked + untracked, respectând .gitignore), FĂRĂ să atingă
++indexul real sau working tree-ul. Commit-ul e ancorat sub refs/jarvis-safety/*
++(nu apare în `git log` normal, nu murdărește stash-ul).
+ 
+ Recuperare, dacă ceva merge prost:
+-    git stash apply <hash>          # aplică checkpoint-ul peste starea curentă
+-    git reset --hard <hash>         # revino EXACT la starea din checkpoint (distructiv)
++    git restore --source=<hash> --worktree -- .   # readuce fișierele din checkpoint
+ 
+ Checkpoint-urile sunt loghate local (fișier text simplu), ca să le
+ găsești ușor după fapt, fără să cauți prin reflog.
+ 
+-IMPORTANT: dacă working tree-ul e curat (nimic de salvat), `git stash
+-create` nu returnează niciun hash — tratăm asta ca "nimic de făcut",
+-nu ca eroare.
++IMPORTANT: dacă working tree-ul e curat (nimic de salvat), nu se creează niciun
++checkpoint — tratăm asta ca "nimic de făcut", nu ca eroare.
+ """
+ 
++import os
+ import subprocess
++import tempfile
+ from datetime import datetime
+ from pathlib import Path
+ 
+ LOG_CHECKPOINT = Path.home() / ".jarvis" / "git_safety_log.txt"
++_REF_PREFIX = "refs/jarvis-safety"
++_ARBORE_GOL = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"  # hash-ul arborelui Git gol
++
++
++def _git(args: list[str], cwd: str, env: dict | None = None, timeout: int = 15) -> str:
++    rezultat = subprocess.run(
++        ["git", *args], capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env,
++    )
++    if rezultat.returncode != 0:
++        raise RuntimeError(rezultat.stderr.strip() or f"git {args[0]} a eșuat")
++    return rezultat.stdout.strip()
+ 
+ 
+ def creeaza_checkpoint(motiv: str, cale_repo: str = ".") -> str:
+     """
+-    Creează un checkpoint Git neintruziv (git stash create) înainte de o
+-    acțiune riscantă. Nu modifică branch-ul activ, nu cere confirmare.
++    Creează un checkpoint Git neintruziv înainte de o acțiune riscantă. Nu modifică
++    branch-ul activ, indexul real, working tree-ul sau stash-ul și nu cere confirmare.
++
++    FIX: `git stash create` ignora fișierele UNTRACKED, deci fișierele noi, necomise,
++    nu erau protejate. Acum construim checkpoint-ul cu un index TEMPORAR
++    (`git add -A` pe acel index, respectând .gitignore -> `write-tree` -> `commit-tree`)
++    și îl ancorăm cu un ref propriu (refs/jarvis-safety/...), ca să nu fie șters de gc.
+ 
+     Parametri:
+         motiv:     descriere scurtă a acțiunii care urmează (pentru log)
+         cale_repo: calea repo-ului. Default: directorul curent.
+ 
+     Returnează:
+-        - hash-ul checkpoint-ului (string), dacă a fost creat cu succes
+-        - "" (string gol) dacă nu era nimic de salvat (working tree curat)
+-          sau dacă directorul nu e un repo Git — NU e tratat ca eroare,
+-          doar înseamnă că nu era nevoie de checkpoint.
+-
+-    Eșecurile sunt înghițite silențios (returnează "") — un checkpoint
+-    ratat nu trebuie NICIODATĂ să blocheze acțiunea reală a utilizatorului.
++        - hash-ul commit-ului de checkpoint, dacă a fost creat
++        - "" dacă nu era nimic de salvat (working tree curat), dacă directorul nu e
++          repo Git sau dacă a apărut orice eroare — un checkpoint ratat nu trebuie
++          NICIODATĂ să blocheze acțiunea reală a utilizatorului.
++
++    Recuperare:
++        git restore --source=<hash> --worktree -- .   # readuce fișierele (inclusiv cele noi)
++        git show <hash> --stat                        # vezi ce conține
+     """
++    cale_repo = os.path.abspath(cale_repo or ".")
++    index_tmp = None
+     try:
+-        rezultat = subprocess.run(
+-            ["git", "stash", "create", f"[Jarvis Safety Net] {motiv}"],
+-            capture_output=True,
+-            text=True,
+-            timeout=10,
+-            cwd=cale_repo,
+-        )
+-
+-        hash_checkpoint = rezultat.stdout.strip()
+-
+-        if not hash_checkpoint:
+-            # Working tree curat — nimic de salvat, nu e eroare
+-            return ""
+-
+-        # Salvăm referința explicit — obiectele din `stash create` NU sunt
+-        # ținute de niciun ref, deci ar fi eligibile pentru garbage collection
+-        # dacă nu le "ancorăm" cu `stash store`.
+-        subprocess.run(
+-            ["git", "stash", "store", "-m", f"[Jarvis Safety Net] {motiv}", hash_checkpoint],
+-            capture_output=True,
+-            text=True,
+-            timeout=10,
+-            cwd=cale_repo,
+-        )
++        radacina = _git(["rev-parse", "--show-toplevel"], cale_repo)
++        try:
++            cap = _git(["rev-parse", "--verify", "-q", "HEAD"], radacina)
++        except RuntimeError:
++            cap = ""  # repo fără niciun commit
++
++        fd, index_tmp = tempfile.mkstemp(prefix="jarvis-idx-")
++        os.close(fd)
++        os.unlink(index_tmp)  # git vrea să creeze el fișierul de index
++        env = {**os.environ, "GIT_INDEX_FILE": index_tmp}
++
++        if cap:
++            _git(["read-tree", cap], radacina, env)
++        _git(["add", "-A"], radacina, env, timeout=30)
++        arbore = _git(["write-tree"], radacina, env)
++
++        arbore_cap = _git(["rev-parse", f"{cap}^{{tree}}"], radacina) if cap else _ARBORE_GOL
++        if arbore == arbore_cap:
++            return ""  # working tree curat — nimic de salvat
++
++        mesaj = f"[Jarvis Safety Net] {motiv}"
++        comanda = ["commit-tree", arbore, "-m", mesaj] + (["-p", cap] if cap else [])
++        env_commit = {
++            **env,
++            "GIT_AUTHOR_NAME": "Jarvis", "GIT_AUTHOR_EMAIL": "jarvis@localhost",
++            "GIT_COMMITTER_NAME": "Jarvis", "GIT_COMMITTER_EMAIL": "jarvis@localhost",
++        }
++        hash_checkpoint = _git(comanda, radacina, env_commit)
++        _git(["update-ref", f"{_REF_PREFIX}/{datetime.now():%Y%m%d-%H%M%S}-{hash_checkpoint[:7]}",
++              hash_checkpoint], radacina)
+ 
+         _logheaza_checkpoint(hash_checkpoint, motiv)
+-        print(f"[Git Safety Net] Checkpoint creat: {hash_checkpoint[:10]} ({motiv})")
++        print(f"[Git Safety Net] Checkpoint creat: {hash_checkpoint[:10]} ({motiv[:80]})")
+         return hash_checkpoint
+ 
+     except FileNotFoundError:
+         return ""  # git nu e instalat — nimic de făcut
+-    except subprocess.TimeoutExpired:
+-        return ""
+     except Exception:
+-        return ""  # orice altă eroare — nu blocăm acțiunea reală pentru asta
++        return ""  # nu repo / timeout / orice altă eroare — nu blocăm acțiunea reală
++    finally:
++        if index_tmp:
++            try:
++                os.unlink(index_tmp)
++            except OSError:
++                pass
+ 
+ 
+ def _logheaza_checkpoint(hash_checkpoint: str, motiv: str):
+diff --git a/src/core/llm_provider.py b/src/core/llm_provider.py
+index 8c7bb82..af8920a 100644
+--- a/src/core/llm_provider.py
++++ b/src/core/llm_provider.py
+@@ -27,6 +27,13 @@ from dotenv import load_dotenv
+ load_dotenv()
+ 
+ TIMEOUT_PER_APEL = 18
++# FIX: la cod, cererile sunt non-streaming cu max_tokens 16384 pe modele de reasoning —
++# 18 s nu ajung, deci răspunsurile lungi expirau mereu. Timeout propriu, mai mare, plus un
++# plafon pentru TOATĂ cascada (altfel 3 chei × 3 modele × timeout = minute până la Gemini).
++TIMEOUT_COD = 60
++DEADLINE_CASCADA_COD = 100
++
++_MESAJ_TAIAT = "\n\n[Răspunsul a fost tăiat de limita de lungime.]"
+ 
+ _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+ 
+@@ -62,7 +69,7 @@ _CONFIG_CONVERSATIE = [
+         "params": {
+             "temperature": 0.2,
+             "top_p": 0.7,
+-            "max_tokens": 1024
++            "max_tokens": 4096  # FIX: era 1024 -> răspunsuri tăiate la jumătate
+         }
+     },
+     {
+@@ -90,9 +97,13 @@ _nvidia_chei_conversatie = [
+ ]
+ _nvidia_chei_conversatie = [k for k in _nvidia_chei_conversatie if k]
+ 
+-# Cuplăm fiecare cheie cu modelul ei specific
++# Cuplăm fiecare cheie cu modelul ei specific.
++# FIX: cu mai puține chei decât modele (ex. 1 cheie), nu exista cascadă de modele: pool-ul
++# avea câte o intrare per cheie. Acum are max(chei, modele) intrări, chei refolosite ciclic.
+ _pool_conversatie = []
+-for i, cheie in enumerate(_nvidia_chei_conversatie):
++_nr_intrari_pool = max(len(_nvidia_chei_conversatie), len(_CONFIG_CONVERSATIE)) if _nvidia_chei_conversatie else 0
++for i in range(_nr_intrari_pool):
++    cheie = _nvidia_chei_conversatie[i % len(_nvidia_chei_conversatie)]
+     config = _CONFIG_CONVERSATIE[i % len(_CONFIG_CONVERSATIE)]
+     _pool_conversatie.append({
+         "cheie": cheie,
+@@ -191,6 +202,7 @@ def _apel_chat_openai(
+     extra_body: dict | None = None,
+     frequency_penalty: float | None = None,
+     presence_penalty: float | None = None,
++    timeout: float | None = None,
+ ) -> dict | Any | None:
+     """Helper generic — POST {base_url}/chat/completions."""
+     payload: dict[str, Any] = {
+@@ -212,21 +224,22 @@ def _apel_chat_openai(
+         "Content-Type": "application/json",
+     }
+ 
++    timeout = timeout or TIMEOUT_PER_APEL
+     _start = time.perf_counter()
+     try:
+         if stream:
+             headers["Accept"] = "text/event-stream"
+-            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL, stream=True)
++            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout, stream=True)
+             raspuns.raise_for_status()
+             print(f"[TIMP] NVIDIA '{model}' — până la primul byte (streaming): {time.perf_counter() - _start:.2f}s")
+             return raspuns.iter_lines()
+         else:
+-            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL)
++            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout)
+             raspuns.raise_for_status()
+             print(f"[TIMP] NVIDIA '{model}' — răspuns complet: {time.perf_counter() - _start:.2f}s")
+             return raspuns.json()
+     except requests.exceptions.Timeout:
+-        print(f"[NVIDIA] Timeout ({TIMEOUT_PER_APEL}s) pentru '{model}'")
++        print(f"[NVIDIA] Timeout ({timeout}s) pentru '{model}'")
+         return None
+     except requests.exceptions.HTTPError as e:
+         print(f"[NVIDIA] HTTP {e.response.status_code} pentru '{model}': {e.response.text[:200]}")
+@@ -259,9 +272,18 @@ def _extrage_continut(date: dict) -> str | None:
+         return None
+ 
+ 
++def _a_fost_taiat(date) -> bool:
++    """True dacă răspunsul s-a oprit din cauza max_tokens (finish_reason == "length")."""
++    try:
++        return date["choices"][0].get("finish_reason") == "length"
++    except Exception:
++        return False
++
++
+ def _proceseaza_stream(stream_generator) -> str:
+     continut_final = []
+     reasoning_final = []
++    taiat = False
+ 
+     try:
+         for line in stream_generator:
+@@ -274,6 +296,8 @@ def _proceseaza_stream(stream_generator) -> str:
+                 chunk = json.loads(line_decoded)
+                 if not chunk.get("choices"): continue
+                 delta = chunk["choices"][0].get("delta", {})
++                if chunk["choices"][0].get("finish_reason") == "length":
++                    taiat = True
+ 
+                 reasoning = delta.get("reasoning_content")
+                 if reasoning: reasoning_final.append(reasoning)
+@@ -288,7 +312,11 @@ def _proceseaza_stream(stream_generator) -> str:
+     if reasoning_final:
+         print(f"[NVIDIA] Reasoning capturat ({len(''.join(reasoning_final))} caractere)")
+ 
+-    return "".join(continut_final)
++    text = "".join(continut_final)
++    if taiat and text:
++        print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
++        text += _MESAJ_TAIAT
++    return text
+ 
+ 
+ def intreaba_nvidia_conversatie(
+@@ -334,7 +362,11 @@ def intreaba_nvidia_conversatie(
+             return _proceseaza_stream(rezultat)
+         else:
+             content = _extrage_continut(rezultat)
+-            if content: return content
++            if content:
++                if _a_fost_taiat(rezultat):
++                    print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
++                    content += _MESAJ_TAIAT
++                return content
+ 
+     print(f"[NVIDIA] Toate cele {len(_pool_conversatie)} combinații au eșuat.")
+     return None
+@@ -359,8 +391,12 @@ def intreaba_nvidia_cod(
+         "seed": 42
+     }
+ 
++    _start_cascada = time.perf_counter()
+     for index_cheie, cheie in enumerate(_nvidia_chei_coding):
+         for model in _MODELE_CODING:
++            if time.perf_counter() - _start_cascada > DEADLINE_CASCADA_COD:
++                print(f"[NVIDIA] Cascada de cod a depășit {DEADLINE_CASCADA_COD}s — las fallback-ul (Gemini) să preia.")
++                return None
+             if model in _modele_nvidia_retrase:
+                 print(f"[NVIDIA] Sar peste coding '{model}' (marcat anterior ca retras — 410 Gone)")
+                 continue
+@@ -368,7 +404,8 @@ def intreaba_nvidia_cod(
+             print(f"[NVIDIA] Apelează Coding (cheie #{index_cheie + 1}): Model '{model}'")
+             try:
+                 rezultat = _apel_chat_openai(
+-                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=stream, **params
++                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=stream,
++                    timeout=TIMEOUT_COD, **params
+                 )
+             except LimitaDeRataNvidia as e:
+                 # Toate modelele din bucla interioară folosesc ACEEAȘI
+@@ -380,6 +417,9 @@ def intreaba_nvidia_cod(
+             if rezultat:
+                 continut = _proceseaza_stream(rezultat) if stream else _extrage_continut(rezultat)
+                 if continut:
++                    if not stream and _a_fost_taiat(rezultat):
++                        print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
++                        continut += _MESAJ_TAIAT
+                     return continut
+ 
+     return None
+diff --git a/src/core/router.py b/src/core/router.py
+index 7fcf919..c756e6c 100644
+--- a/src/core/router.py
++++ b/src/core/router.py
+@@ -58,7 +58,13 @@ CUVINTE_UNELTE = (
+     "data de azi", "data de astăzi", "data de astazi", "data curentă", "data curenta",
+     "care e data", "care este data",
+     # joburi fundal
+-    "job", "rulează în fundal", "ruleaza in fundal",
++    "job", "job*", "rulează în fundal", "ruleaza in fundal",
++    # FIX: întrebări de info sistem care au unealtă (ruleaza_comanda_info:
++    # lista_fisiere, info_retea, info_sistem, utilizator_curent, procese_active)
++    # dar nu conțineau niciun cuvânt-cheie -> mergeau pe NVIDIA, fără unelte.
++    "fisier*", "fișier*", "director*", "folder*", "ip", "adres* ip", "kernel",
++    "retea*", "rețea*", "proces*", "pe sistem", "versiune* de kernel",
++    "utilizatorul curent",
+     # FIX: forme flexionate românești (\"*\" = orice terminație). Înainte \"volumul\",
+     # \"calendarul\", \"luminozitatea\", \"procesorul\", \"temperatură\" cădeau pe
+     # \"conversatie\" (NVIDIA, fără unelte) și Jarvis nu putea acționa.
+diff --git a/src/core/security.py b/src/core/security.py
+index 4567310..f4b4bfa 100644
+--- a/src/core/security.py
++++ b/src/core/security.py
+@@ -57,6 +57,16 @@ class canal_confirmare:
+         return False
+ 
+ 
++# Oprire/restart sistem. Definit separat, ca să poată fi tratat diferit pentru
++# unelte care primesc text liber (scrie_text) — vezi verifica_blacklist.
++_PATTERN_OPRIRE = r"\b(shutdown|reboot|halt|poweroff)\b"
++# Varianta "ca și comandă": la început de text / după ; & | newline, opțional cu sudo,
++# sau prin systemctl. Nu prinde propoziții ca „trebuie să dau reboot la router".
++_PATTERN_OPRIRE_CA_COMANDA = (
++    r"(?:^|[;&|\n]\s*)(?:sudo\s+)?(?:shutdown|reboot|halt|poweroff)\b"
++    r"|\bsystemctl\s+(?:\w+\s+)*(?:reboot|poweroff|halt|suspend|hibernate)\b"
++)
++
+ # ---- Pattern-uri blocate complet (blacklist) ----
+ # Dacă vreun argument al unui apel de funcție conține unul din aceste
+ # pattern-uri, execuția e oprită imediat, fără confirmare, fără excepții.
+@@ -75,7 +85,7 @@ BLACKLIST_PATTERNS = [
+     r"\bchmod\s+-R\s+777",          # permisiuni globale nesigure
+     r"\bchown\s+-R.*root",          # schimbare owner la root recursiv
+     r"\bsudo\s+rm\b",              # rm cu sudo
+-    r"\b(shutdown|reboot|halt|poweroff)\b",  # oprire/restart sistem
++    _PATTERN_OPRIRE,  # oprire/restart sistem
+     r"(?:^|[;&|]\s*)(?:sudo\s+)?passwd\b",  # comanda passwd (nu orice text cu "passwd")
+     r"\b(useradd|userdel|usermod)\b",  # modificare utilizatori sistem
+     r"\b(visudo|sudoers)\b",        # modificare privilegii sudo
+@@ -85,7 +95,9 @@ BLACKLIST_PATTERNS = [
+     r"\bwget\b.+\|\s*(bash|sh)\b",  # pipe wget direct în shell
+     r"(?:^|[;&|]\s*)(?:eval|exec)\s+",   # eval/exec ca și comandă shell
+     r"\bbase64\s+(--decode|-d).*\|",  # decode base64 și pipe (ofuscare)
+-    r"\bpython[\d.]*\s.*-c\s+['\"]", # python -c "cod arbitrar"
++    # FIX: `.*-c` bloca și `python build.py -c 'cfg'` (-c e flag-ul scriptului).
++    # Acum doar `-c` care aparține interpretorului (imediat după python + opțiuni).
++    r"\bpython[\d.]*\s+(?:-[\w.]+\s+)*-\w*c\s+['\"]", # python -c "cod arbitrar"
+     # FIX: înainte `\bsubprocess\b` bloca orice text cu cuvântul "subprocess";
+     # acum doar apelurile efective.
+     r"\bos\.system\s*\(|\bsubprocess\.(run|call|Popen|check_output|check_call)\b",
+@@ -100,6 +112,7 @@ BLACKLIST_PATTERNS = [
+ 
+ # Pre-compilăm regex-urile o dată la import, nu la fiecare apel
+ _BLACKLIST_COMPILED = [re.compile(p, re.IGNORECASE) for p in BLACKLIST_PATTERNS]
++_OPRIRE_CA_COMANDA_COMPILAT = re.compile(_PATTERN_OPRIRE_CA_COMANDA, re.IGNORECASE)
+ 
+ # ---- Unelte pentru care Git Safety Net-ul NU are sens ----
+ # Checkpoint-ul Git protejează fișierele din repo — n-are rost să facem
+@@ -128,8 +141,15 @@ _PARAMETRI_TEXT_LIBER = {
+     "deleaga_agent_devops": {"sarcina"},
+     "deleaga_agent_cercetare": {"sarcina"},
+     "gaseste_pe_ecran": {"element"}, "vezi_ecranul": {"intrebare"},
++    # FIX: calea e pasată lui `code` ca argument (cu `--`), nu interpretată de shell:
++    # „halt.py" nu trebuie blocat ca „halt".
++    "deschide_vscode": {"cale"},
+ }
+ 
++# Unelte care tastează text liber: oprirea sistemului se blochează doar când textul
++# arată a COMANDĂ (restul pattern-urilor rămân active — tastarea într-un terminal e vector de atac).
++_UNELTE_TEXT_TASTAT = {"scrie_text"}
++
+ 
+ def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
+     """
+@@ -145,6 +165,8 @@ def verifica_blacklist(nume_functie: str, argumente: dict) -> tuple[bool, str]:
+     )
+ 
+     for pattern in _BLACKLIST_COMPILED:
++        if nume_functie in _UNELTE_TEXT_TASTAT and pattern.pattern == _PATTERN_OPRIRE:
++            pattern = _OPRIRE_CA_COMANDA_COMPILAT
+         if pattern.search(text_de_verificat):
+             return False, (
+                 f"Apelul funcției '{nume_functie}' cu argumentele "
+@@ -244,6 +266,9 @@ def trece_prin_securitate(
+         # Pasul 3: Git Safety Net — checkpoint automat, silențios, doar
+         # pentru acțiuni unde chiar are sens (nu ating repo-ul altfel)
+         if nume_functie not in _FUNCTII_FARA_SAFETY_NET:
+-            creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})")
++            # FIX: checkpoint-ul se făcea mereu în directorul curent, nu în repo-ul
++            # pe care operează unealta (parametrul `cale_repo`).
++            cale_repo = argumente.get("cale_repo") or "."
++            creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})", cale_repo=str(cale_repo))
+ 
+     return True, ""
+\ No newline at end of file
+diff --git a/src/tools/calendar_google.py b/src/tools/calendar_google.py
+index 7f20b8f..61625f3 100644
+--- a/src/tools/calendar_google.py
++++ b/src/tools/calendar_google.py
+@@ -19,6 +19,7 @@ import datetime
+ from src.core.registry import unealta
+ 
+ try:
++    from google.auth.exceptions import RefreshError
+     from google.auth.transport.requests import Request
+     from google.oauth2.credentials import Credentials
+     from google_auth_oauthlib.flow import InstalledAppFlow
+@@ -36,10 +37,23 @@ _SCOPES = ["https://www.googleapis.com/auth/calendar"]
+ _CALE_CREDENTIALS = "credentials.json"
+ _CALE_TOKEN = "token.json"
+ 
++# FIX: fusul orar era hardcodat. Configurabil din .env (JARVIS_TIMEZONE), default Chișinău.
++_FUS_ORAR = os.getenv("JARVIS_TIMEZONE", "Europe/Chisinau")
++
+ # Serviciul Google Calendar e construit lazy, o singură dată, la prima utilizare
+ _service = None
+ 
+ 
++def _poate_autentifica_interactiv() -> bool:
++    """True doar dacă avem terminal interactiv și (pe Linux) un display pentru browser."""
++    import sys
++    if not sys.stdin or not sys.stdin.isatty():
++        return False
++    if sys.platform.startswith("linux") and not (os.getenv("DISPLAY") or os.getenv("WAYLAND_DISPLAY")):
++        return False
++    return True
++
++
+ def _obtine_service():
+     """
+     Returnează un obiect 'service' autentificat pentru Google Calendar API.
+@@ -57,17 +71,48 @@ def _obtine_service():
+     creds = None
+ 
+     if os.path.exists(_CALE_TOKEN):
+-        creds = Credentials.from_authorized_user_file(_CALE_TOKEN, _SCOPES)
++        try:
++            creds = Credentials.from_authorized_user_file(_CALE_TOKEN, _SCOPES)
++        except Exception as e:
++            # token.json corupt / de la alt scope -> îl tratăm ca lipsă și refacem autentificarea
++            print(f"[Calendar] token.json invalid ({e}) — refac autentificarea.")
++            creds = None
+ 
+     if not creds or not creds.valid:
++        reimprospatat = False
+         if creds and creds.expired and creds.refresh_token:
+-            creds.refresh(Request())
+-        else:
++            # FIX: un refresh eșuat (token revocat / expirat — la proiectele OAuth în
++            # modul „Testing" refresh_token-ul expiră după 7 zile) strica unealta
++            # permanent, până ștergeai token.json manual.
++            try:
++                creds.refresh(Request())
++                reimprospatat = True
++            except RefreshError as e:
++                print(f"[Calendar] Refresh-ul token-ului a eșuat ({e}) — șterg token.json și refac autentificarea.")
++                try:
++                    os.remove(_CALE_TOKEN)
++                except OSError:
++                    pass
++                creds = None
++            except Exception as e:
++                # eroare de rețea etc.: nu ștergem token-ul, doar renunțăm acum
++                print(f"[Calendar] Nu am putut reîmprospăta token-ul: {e}")
++                return None
++
++        if not reimprospatat:
+             if not os.path.exists(_CALE_CREDENTIALS):
+                 return None  # nu putem autentifica fără credentials.json
+ 
++            # FIX: run_local_server() deschide un browser și așteaptă la nesfârșit. Din
++            # server/widget sau fără display, ar bloca tura. Permitem autentificarea
++            # interactivă doar din terminal cu display.
++            if not _poate_autentifica_interactiv():
++                print("[Calendar] Token invalid și nu pot deschide browser-ul de aici. "
++                      "Rulează o dată `python -m src.tools.calendar_google` dintr-un terminal.")
++                return None
++
+             flow = InstalledAppFlow.from_client_secrets_file(_CALE_CREDENTIALS, _SCOPES)
+-            creds = flow.run_local_server(port=0)
++            creds = flow.run_local_server(port=0, timeout_seconds=120)
+ 
+         # Salvăm token-ul (nou sau reîmprospătat) pentru rulările viitoare
+         with open(_CALE_TOKEN, "w") as f:
+@@ -78,6 +123,11 @@ def _obtine_service():
+ 
+ 
+ def _mesaj_lipsa_config() -> str:
++    if _GOOGLE_LIBS_DISPONIBILE and os.path.exists(_CALE_CREDENTIALS):
++        return (
++            "Nu mă pot autentifica la Google Calendar (token expirat sau revocat). "
++            "Rulează `python -m src.tools.calendar_google` dintr-un terminal ca să te reautentifici."
++        )
+     if not _GOOGLE_LIBS_DISPONIBILE:
+         return (
+             "Librăriile Google Calendar nu sunt instalate. Rulează: "
+@@ -106,11 +156,19 @@ def _mesaj_lipsa_config() -> str:
+             "type": "INTEGER",
+             "description": "Câte evenimente viitoare să returneze. Default: 10.",
+             "optional": True,
+-        }
++        },
++        "zi": {
++            "type": "STRING",
++            "description": (
++                "Opțional: 'azi', 'maine' sau o dată ISO (ex: '2026-06-25'). "
++                "Dacă e dat, returnează doar evenimentele din ziua respectivă."
++            ),
++            "optional": True,
++        },
+     },
+     max_linii=20,
+ )
+-def evenimente_viitoare(numar: int = 10):
++def evenimente_viitoare(numar: int = 10, zi: str = ""):
+     """Listează următoarele evenimente din calendarul principal al utilizatorului."""
+     service = _obtine_service()
+     if service is None:
+@@ -118,22 +176,40 @@ def evenimente_viitoare(numar: int = 10):
+ 
+     try:
+         # FIX: utcnow() e deprecat; numar poate veni ca float (5.0) -> API-ul respinge maxResults
+-        acum = datetime.datetime.now(datetime.timezone.utc).isoformat()
++        acum_dt = datetime.datetime.now(datetime.timezone.utc)
++        acum = acum_dt.isoformat()
+         try:
+             numar = max(1, min(int(numar), 100))
+         except (TypeError, ValueError):
+             numar = 10
+-        rezultat = (
+-            service.events()
+-            .list(
+-                calendarId="primary",
+-                timeMin=acum,
+-                maxResults=numar,
+-                singleEvents=True,
+-                orderBy="startTime",
+-            )
+-            .execute()
+-        )
++
++        parametri = dict(calendarId="primary", timeMin=acum, maxResults=numar,
++                         singleEvents=True, orderBy="startTime")
++
++        # FIX: nu se putea cere „azi"/„mâine" — se luau doar următoarele N evenimente.
++        zi_n = (zi or "").strip().lower().replace("â", "a")
++        if zi_n:
++            try:
++                from zoneinfo import ZoneInfo
++                tz = ZoneInfo(_FUS_ORAR)
++            except Exception:
++                tz = datetime.timezone.utc
++            azi = datetime.datetime.now(tz).date()
++            if zi_n == "azi":
++                data_zi = azi
++            elif zi_n == "maine":
++                data_zi = azi + datetime.timedelta(days=1)
++            else:
++                try:
++                    data_zi = datetime.date.fromisoformat(zi_n[:10])
++                except ValueError:
++                    return f"Nu înțeleg ziua '{zi}'. Folosește 'azi', 'maine' sau o dată ISO (2026-06-25)."
++            inceput_zi = datetime.datetime.combine(data_zi, datetime.time.min, tzinfo=tz)
++            parametri["timeMin"] = max(inceput_zi, acum_dt.astimezone(tz)).isoformat() \
++                if data_zi == azi else inceput_zi.isoformat()
++            parametri["timeMax"] = (inceput_zi + datetime.timedelta(days=1)).isoformat()
++
++        rezultat = service.events().list(**parametri).execute()
+         evenimente = rezultat.get("items", [])
+ 
+         if not evenimente:
+@@ -189,8 +265,8 @@ def creeaza_eveniment(titlu: str, inceput: str, sfarsit: str, descriere: str = "
+     eveniment = {
+         "summary": titlu,
+         "description": descriere,
+-        "start": {"dateTime": inceput, "timeZone": "Europe/Chisinau"},
+-        "end": {"dateTime": sfarsit, "timeZone": "Europe/Chisinau"},
++        "start": {"dateTime": inceput, "timeZone": _FUS_ORAR},
++        "end": {"dateTime": sfarsit, "timeZone": _FUS_ORAR},
+     }
+ 
+     try:
+@@ -224,4 +300,10 @@ def sterge_eveniment(eveniment_id: str):
+         service.events().delete(calendarId="primary", eventId=eveniment_id).execute()
+         return f"Eveniment {eveniment_id} șters."
+     except HttpError as e:
+-        return f"Eroare la ștergerea evenimentului: {str(e)}"
+\ No newline at end of file
++        return f"Eroare la ștergerea evenimentului: {str(e)}"
++
++
++if __name__ == "__main__":
++    # Reautentificare manuală (din terminal): `python -m src.tools.calendar_google`
++    _service = None
++    print("Calendar OK." if _obtine_service() else _mesaj_lipsa_config())
+diff --git a/src/tools/external.py b/src/tools/external.py
+index 16c48a2..11b775c 100644
+--- a/src/tools/external.py
++++ b/src/tools/external.py
+@@ -15,6 +15,7 @@ Calendarul Google (parte separată din Task 2.7) e într-un fișier diferit
+ (calendar_google.py), pentru că necesită OAuth și e mai complex.
+ """
+ 
++import os
+ import requests
+ from src.core.registry import unealta
+ 
+@@ -51,17 +52,20 @@ def _descrie_vreme(cod: int) -> str:
+     description=(
+         "Returnează vremea curentă și prognoza pentru un oraș sau localitate. "
+         "Folosește pentru 'ce vreme e în X?', 'cum e afară?', 'plouă mâine?' etc. "
+-        "Dacă utilizatorul nu specifică un oraș, presupune Chișinău, Moldova."
++        "Dacă utilizatorul nu specifică un oraș, lasă parametrul gol (se folosește orașul implicit configurat)."
+     ),
+     parameters={
+         "oras": {
+             "type": "STRING",
+-            "description": "Numele orașului sau localității. Ex: 'Chișinău', 'București', 'Iași'.",
++            "description": "Numele orașului sau localității. Ex: 'Chișinău', 'București', 'Iași'. Gol = orașul implicit.",
++            "optional": True,
+         }
+     },
+ )
+-def vremea(oras: str = "Chișinău"):
++def vremea(oras: str = ""):
+     """Vremea curentă pentru un oraș, via Open-Meteo (geocoding + forecast)."""
++    # FIX: orașul implicit era hardcodat „Chișinău". Acum se citește din .env (JARVIS_ORAS).
++    oras = (oras or "").strip() or os.getenv("JARVIS_ORAS", "Chișinău")
+     try:
+         # Pasul 1: geocoding — transformăm numele orașului în coordonate
+         geo_raspuns = requests.get(
+diff --git a/src/ui/server.py b/src/ui/server.py
+index 43abb3e..d4d4601 100644
+--- a/src/ui/server.py
++++ b/src/ui/server.py
+@@ -32,6 +32,7 @@ from src.core.database import db
+ from src.core.memory import memorie
+ from src.core.rag import rag
+ from src.core.context_manager import proceseaza as proceseaza_context
++from src.core.security import canal_confirmare
+ from google import genai
+ from google.genai import types
+ 
+@@ -56,7 +57,16 @@ _ORIGINI_PERMISE = {
+     f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}",
+     *[o.strip() for o in os.getenv("JARVIS_ALLOWED_ORIGINS", "").split(",") if o.strip()],
+ }
+-ERORI_FALLBACK = (503, 429, 500, 403)
++ERORI_FALLBACK = (503, 429, 500, 502, 504, 403)  # FIX: lipseau 502 și 504 (existente în main.py)
++
++# FIX: uneltele cu necesita_confirmare (git_commit, git_push, click_la_pozitie, creeaza_eveniment...)
++# nu puteau fi folosite din UI: nu exista canal de confirmare -> input() bloca thread-ul (cu lock-ul
++# ținut, deci tot UI-ul îngheța) sau acțiunea era refuzată automat. Acum confirmarea se cere în
++# browser/widget prin WebSocket (mesaj "confirmare" -> răspuns {"tip": "confirmare", "id", "aprobat"}).
++TIMEOUT_CONFIRMARE = 60  # secunde; fără răspuns => refuz (fail closed)
++_confirmari: dict[str, dict] = {}
++_loop_principal: asyncio.AbstractEventLoop | None = None
++_taskuri_mesaje: set = set()
+ 
+ # FIX: `istoric` e global și e modificat din thread-uri de executor —
+ # două mesaje simultane se intercalau și corupeau istoricul.
+@@ -125,10 +135,42 @@ def ruleaza_agent(mesaj_user: str) -> str:
+     # (apărea ca un TypeError confuz).
+     if not _gemini_clienti:
+         return "Nu există nicio GEMINI_API_KEY configurată în .env."
+-    with _LOCK_AGENT:
++    with _LOCK_AGENT, canal_confirmare(_confirma_prin_ws):
+         return _ruleaza_agent_blocat(mesaj_user)
+ 
+ 
++def _confirma_prin_ws(nume_functie: str, argumente: dict) -> bool:
++    """Cere confirmarea utilizatorului în UI (WebSocket). Rulează în thread-ul agentului."""
++    import uuid
++    if _loop_principal is None or not conexiuni_active:
++        print("[Securitate] Niciun client UI conectat pentru confirmare — acțiune refuzată.")
++        return False
++
++    id_conf = uuid.uuid4().hex[:12]
++    intrare = {"event": threading.Event(), "aprobat": False}
++    _confirmari[id_conf] = intrare
++    try:
++        asyncio.run_coroutine_threadsafe(
++            broadcast({
++                "tip": "confirmare",
++                "id": id_conf,
++                "functie": nume_functie,
++                "argumente": {str(k): str(v)[:300] for k, v in (argumente or {}).items()},
++                "timeout": TIMEOUT_CONFIRMARE,
++            }),
++            _loop_principal,
++        ).result(timeout=5)
++        if not intrare["event"].wait(TIMEOUT_CONFIRMARE):
++            print(f"[Securitate] Confirmare expirată pentru '{nume_functie}' — acțiune refuzată.")
++            return False
++        return bool(intrare["aprobat"])
++    except Exception as e:
++        print(f"[Securitate] Confirmarea din UI a eșuat ({e}) — acțiune refuzată.")
++        return False
++    finally:
++        _confirmari.pop(id_conf, None)
++
++
+ def _anuleaza_tura(mesaj_curent) -> None:
+     """
+     FIX: dacă agent_loop pica (eroare fatală sau toate cheile indisponibile),
+@@ -226,6 +268,40 @@ async def api_history():
+     return {"mesaje": mesaje[-20:]}
+ 
+ 
++async def _proceseaza_mesaj(text_user: str):
++    await broadcast({"tip": "status", "stare": "thinking"})
++
++    loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
++    try:
++        raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
++    except Exception as e:
++        raspuns = f"Eroare: {str(e)[:200]}"
++        await broadcast({"tip": "eroare", "text": raspuns})
++        await broadcast({"tip": "status", "stare": "idle"})
++        return
++
++    # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
++    # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
++    def _persista():
++        db.salveaza_mesaj(sesiune_id, "user", text_user)
++        db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
++        rag.indexeaza_mesaj("user", text_user, sesiune_id)
++        rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
++
++    try:
++        await loop.run_in_executor(None, _persista)
++    except Exception as e:
++        print(f"[Memorie] Salvare/indexare eșuată: {e}")
++
++    await broadcast({
++        "tip":    "raspuns",
++        "text":   raspuns,
++        "user":   text_user,
++        "status": "done",
++    })
++    await broadcast({"tip": "status", "stare": "idle"})
++
++
+ @app.websocket("/ws")
+ async def websocket_endpoint(ws: WebSocket):
+     # Blochează cross-site WebSocket hijacking: acceptă doar origini locale
+@@ -237,6 +313,8 @@ async def websocket_endpoint(ws: WebSocket):
+         await ws.close(code=1008)
+         return
+     await ws.accept()
++    global _loop_principal
++    _loop_principal = asyncio.get_running_loop()
+     conexiuni_active.append(ws)
+     print(f"[WS] Client conectat. Total: {len(conexiuni_active)}")
+ 
+@@ -262,42 +340,22 @@ async def websocket_endpoint(ws: WebSocket):
+                 await ws.send_text(json.dumps({"tip": "pong"}))
+                 continue
+ 
++            if tip == "confirmare":
++                intrare = _confirmari.get(str(payload.get("id", "")))
++                if intrare is not None:
++                    intrare["aprobat"] = payload.get("aprobat") is True
++                    intrare["event"].set()
++                continue
++
+             if tip == "mesaj":
+                 text_user = payload.get("text", "").strip()
+                 if not text_user:
+                     continue
+-
+-                await broadcast({"tip": "status", "stare": "thinking"})
+-
+-                loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
+-                try:
+-                    raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
+-                except Exception as e:
+-                    raspuns = f"Eroare: {str(e)[:200]}"
+-                    await broadcast({"tip": "eroare", "text": raspuns})
+-                    await broadcast({"tip": "status", "stare": "idle"})
+-                    continue
+-
+-                # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
+-                # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
+-                def _persista():
+-                    db.salveaza_mesaj(sesiune_id, "user", text_user)
+-                    db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+-                    rag.indexeaza_mesaj("user", text_user, sesiune_id)
+-                    rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+-
+-                try:
+-                    await loop.run_in_executor(None, _persista)
+-                except Exception as e:
+-                    print(f"[Memorie] Salvare/indexare eșuată: {e}")
+-
+-                await broadcast({
+-                    "tip":    "raspuns",
+-                    "text":   raspuns,
+-                    "user":   text_user,
+-                    "status": "done",
+-                })
+-                await broadcast({"tip": "status", "stare": "idle"})
++                # FIX: tura rula în acest handler (await), deci bucla de recepție era blocată și
++                # răspunsul de confirmare al utilizatorului nu putea fi citit. O rulăm ca task.
++                task = asyncio.create_task(_proceseaza_mesaj(text_user))
++                _taskuri_mesaje.add(task)
++                task.add_done_callback(_taskuri_mesaje.discard)
+ 
+     except WebSocketDisconnect:
+         if ws in conexiuni_active:
+diff --git a/src/ui/static/index.html b/src/ui/static/index.html
+index 8de4571..1e79f6c 100644
+--- a/src/ui/static/index.html
++++ b/src/ui/static/index.html
+@@ -622,6 +622,43 @@ requestAnimationFrame(animate);
+ // ── WebSocket ──────────────────────────────────────────────────────────────
+ let ws, retry;
+ 
++// ── Confirmare acțiuni periculoase (git commit/push, click, calendar...) ─────
++function arataConfirmare(d) {
++  const veche = document.getElementById('jarvis-confirm');
++  if (veche) veche.remove();
++  const overlay = document.createElement('div');
++  overlay.id = 'jarvis-confirm';
++  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;font-family:inherit;';
++  const card = document.createElement('div');
++  card.style.cssText = 'background:#101826;color:#e6f1ff;border:1px solid #2b6cb0;border-radius:10px;padding:16px;max-width:90%;width:420px;max-height:80%;overflow:auto;font-size:13px;';
++  const titlu = document.createElement('div');
++  titlu.style.cssText = 'font-weight:600;margin-bottom:8px;';
++  titlu.textContent = '⚠️ Jarvis vrea să execute: ' + d.functie;
++  const corp = document.createElement('pre');
++  corp.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:0 0 12px;font-size:12px;';
++  corp.textContent = Object.entries(d.argumente || {}).map(([k, v]) => k + ': ' + v).join('\n') || '(fără argumente)';
++  const butoane = document.createElement('div');
++  butoane.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
++  const raspunde = (aprobat) => {
++    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ tip: 'confirmare', id: d.id, aprobat: aprobat }));
++    overlay.remove();
++  };
++  const nu = document.createElement('button');
++  nu.textContent = 'Refuză';
++  nu.style.cssText = 'padding:6px 14px;border-radius:6px;border:1px solid #4a5568;background:transparent;color:inherit;cursor:pointer;';
++  nu.onclick = () => raspunde(false);
++  const da = document.createElement('button');
++  da.textContent = 'Aprobă';
++  da.style.cssText = 'padding:6px 14px;border-radius:6px;border:0;background:#2b6cb0;color:#fff;cursor:pointer;';
++  da.onclick = () => raspunde(true);
++  butoane.append(nu, da);
++  card.append(titlu, corp, butoane);
++  overlay.append(card);
++  document.body.appendChild(overlay);
++  setTimeout(() => { if (overlay.isConnected) raspunde(false); }, ((d.timeout || 60) * 1000));
++}
++
++
+ function connect() {
+   ws = new WebSocket(`ws://${location.host}/ws`);
+ 
+@@ -642,6 +679,8 @@ function connect() {
+     } else if (d.tip === 'status') {
+       setState(d.stare);
+       if (d.mesaj) log(d.mesaj, 'info');
++    } else if (d.tip === 'confirmare') {
++      arataConfirmare(d);
+     } else if (d.tip === 'eroare') {
+       removeThinking();
+       log('Eroare: ' + d.text, 'warn');
+diff --git a/src/ui/static/index_desktop.html b/src/ui/static/index_desktop.html
+index 8a9a6b1..2bd4867 100644
+--- a/src/ui/static/index_desktop.html
++++ b/src/ui/static/index_desktop.html
+@@ -398,6 +398,43 @@ requestAnimationFrame(wAnimate);
+ // ── WebSocket ──────────────────────────────────────────────────────────────
+ let ws, retry;
+ 
++// ── Confirmare acțiuni periculoase (git commit/push, click, calendar...) ─────
++function arataConfirmare(d) {
++  const veche = document.getElementById('jarvis-confirm');
++  if (veche) veche.remove();
++  const overlay = document.createElement('div');
++  overlay.id = 'jarvis-confirm';
++  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;font-family:inherit;';
++  const card = document.createElement('div');
++  card.style.cssText = 'background:#101826;color:#e6f1ff;border:1px solid #2b6cb0;border-radius:10px;padding:16px;max-width:90%;width:420px;max-height:80%;overflow:auto;font-size:13px;';
++  const titlu = document.createElement('div');
++  titlu.style.cssText = 'font-weight:600;margin-bottom:8px;';
++  titlu.textContent = '⚠️ Jarvis vrea să execute: ' + d.functie;
++  const corp = document.createElement('pre');
++  corp.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:0 0 12px;font-size:12px;';
++  corp.textContent = Object.entries(d.argumente || {}).map(([k, v]) => k + ': ' + v).join('\n') || '(fără argumente)';
++  const butoane = document.createElement('div');
++  butoane.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
++  const raspunde = (aprobat) => {
++    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ tip: 'confirmare', id: d.id, aprobat: aprobat }));
++    overlay.remove();
++  };
++  const nu = document.createElement('button');
++  nu.textContent = 'Refuză';
++  nu.style.cssText = 'padding:6px 14px;border-radius:6px;border:1px solid #4a5568;background:transparent;color:inherit;cursor:pointer;';
++  nu.onclick = () => raspunde(false);
++  const da = document.createElement('button');
++  da.textContent = 'Aprobă';
++  da.style.cssText = 'padding:6px 14px;border-radius:6px;border:0;background:#2b6cb0;color:#fff;cursor:pointer;';
++  da.onclick = () => raspunde(true);
++  butoane.append(nu, da);
++  card.append(titlu, corp, butoane);
++  overlay.append(card);
++  document.body.appendChild(overlay);
++  setTimeout(() => { if (overlay.isConnected) raspunde(false); }, ((d.timeout || 60) * 1000));
++}
++
++
+ function connect() {
+   ws = new WebSocket(`ws://${location.host}/ws`);
+   ws.onopen = () => {
+@@ -413,6 +450,8 @@ function connect() {
+       wSetState('idle');
+     } else if (d.tip === 'status') {
+       wSetState(d.stare);
++    } else if (d.tip === 'confirmare') {
++      arataConfirmare(d);
+     } else if (d.tip === 'eroare') {
+       removeThinking();
+       wSetState('idle');
+diff --git a/tests/test_fixuri_runda2.py b/tests/test_fixuri_runda2.py
+new file mode 100644
+index 0000000..67419c0
+--- /dev/null
++++ b/tests/test_fixuri_runda2.py
+@@ -0,0 +1,186 @@
++"""
++Teste pentru a doua rundă de corecturi (router, blacklist, git safety, NVIDIA, calendar, UI confirm).
++Rulează fără microfon, rețea sau chei API:  python -m pytest tests -q
++"""
++import asyncio
++import subprocess
++import threading
++
++import pytest
++
++from src.core import security
++from src.core.router import clasifica
++
++
++# ── router: întrebări cu unealtă nu mai cad pe „conversatie" ──────────────────
++@pytest.mark.parametrize("text", [
++    "ce fișiere am în director", "care e adresa mea IP", "ce versiune de kernel rulez",
++    "cine sunt pe sistem", "ce procese consumă cel mai mult", "ce face jobul abc123",
++])
++def test_router_trimite_pe_unelte(text):
++    assert clasifica(text) == "unelte"
++
++
++@pytest.mark.parametrize("text", ["povestește-mi despre Ștefan cel Mare", "ce e un program", "explică-mi fotosinteza"])
++def test_router_nu_exagereaza(text):
++    assert clasifica(text) == "conversatie"
++
++
++# ── blacklist: text legitim nu mai e blocat ───────────────────────────────────
++def test_scrie_text_cu_reboot_in_propozitie_trece():
++    ok, _ = security.verifica_blacklist("scrie_text", {"text": "trebuie să dau reboot la router"})
++    assert ok is True
++
++
++@pytest.mark.parametrize("text", ["reboot", "sudo reboot", "ls; shutdown -h now", "systemctl poweroff"])
++def test_scrie_text_cu_comanda_de_oprire_ramane_blocat(text):
++    ok, _ = security.verifica_blacklist("scrie_text", {"text": text})
++    assert ok is False
++
++
++def test_scrie_text_pastreaza_restul_blacklist():
++    ok, _ = security.verifica_blacklist("scrie_text", {"text": "rm -rf /"})
++    assert ok is False
++
++
++def test_deschide_vscode_halt_py():
++    ok, _ = security.verifica_blacklist("deschide_vscode", {"cale": "halt.py"})
++    assert ok is True
++
++
++def test_oprirea_sistemului_ramane_blocata_la_comenzi():
++    ok, _ = security.verifica_blacklist("ruleaza_comanda", {"comanda": "reboot"})
++    assert ok is False
++
++
++def test_python_c_al_scriptului_nu_e_blocat_dar_python_c_da():
++    ok, _ = security.verifica_blacklist("porneste_job_fundal", {"comanda": "python build.py -c 'cfg'"})
++    assert ok is True
++    ok, _ = security.verifica_blacklist("porneste_job_fundal", {"comanda": "python -c 'import os'"})
++    assert ok is False
++    ok, _ = security.verifica_blacklist("porneste_job_fundal", {"comanda": "python3 -u -c \"print(1)\""})
++    assert ok is False
++
++
++# ── git safety net ────────────────────────────────────────────────────────────
++def _git(cwd, *args):
++    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout
++
++
++@pytest.fixture
++def repo(tmp_path):
++    _git(tmp_path, "init", "-q")
++    _git(tmp_path, "config", "user.email", "t@t")
++    _git(tmp_path, "config", "user.name", "t")
++    (tmp_path / "a.txt").write_text("a\n")
++    _git(tmp_path, "add", ".")
++    _git(tmp_path, "commit", "-qm", "init")
++    return tmp_path
++
++
++def test_checkpoint_include_fisiere_untracked(repo, monkeypatch, tmp_path):
++    from src.core import git_safety
++    monkeypatch.setattr(git_safety, "LOG_CHECKPOINT", tmp_path / "log.txt")
++    (repo / "nou.txt").write_text("nou\n")
++    h = git_safety.creeaza_checkpoint("test", str(repo))
++    assert h
++    assert "nou.txt" in _git(repo, "ls-tree", "-r", "--name-only", h)
++    # nu atinge working tree-ul / indexul real
++    assert "?? nou.txt" in _git(repo, "status", "--short")
++
++
++def test_checkpoint_gol_cand_arborele_e_curat(repo, monkeypatch, tmp_path):
++    from src.core import git_safety
++    monkeypatch.setattr(git_safety, "LOG_CHECKPOINT", tmp_path / "log.txt")
++    assert git_safety.creeaza_checkpoint("test", str(repo)) == ""
++
++
++def test_checkpoint_foloseste_cale_repo_din_argumente(repo, monkeypatch, tmp_path):
++    from src.core import git_safety
++    apelat = {}
++    monkeypatch.setattr(security, "creeaza_checkpoint", lambda motiv, cale_repo=".": apelat.update(cale=cale_repo))
++    monkeypatch.setattr(security, "cere_confirmare", lambda *a, **k: True)
++    ok, _ = security.trece_prin_securitate("git_commit", {"mesaj": "x", "cale_repo": str(repo)}, True)
++    assert ok and apelat["cale"] == str(repo)
++
++
++# ── NVIDIA: răspuns tăiat ─────────────────────────────────────────────────────
++def test_nvidia_detecteaza_finish_reason_length():
++    from src.core.llm_provider import _a_fost_taiat, _proceseaza_stream, _MESAJ_TAIAT
++    assert _a_fost_taiat({"choices": [{"finish_reason": "length", "message": {"content": "x"}}]})
++    assert not _a_fost_taiat({"choices": [{"finish_reason": "stop", "message": {"content": "x"}}]})
++    linii = [
++        b'data: {"choices":[{"delta":{"content":"salut"}}]}',
++        b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
++        b"data: [DONE]",
++    ]
++    assert _proceseaza_stream(iter(linii)) == "salut" + _MESAJ_TAIAT
++
++
++# ── voce: fallback între chei ─────────────────────────────────────────────────
++def test_voce_incearca_urmatoarea_cheie(monkeypatch):
++    try:
++        from src.core import audio_loop
++    except Exception as e:  # sounddevice/PortAudio/torch lipsă (ex. CI fără audio)
++        pytest.skip(f"audio_loop nu se poate importa aici: {e}")
++
++    class Eroare429(Exception):
++        code = 429
++
++    apeluri = []
++
++    def fals(client, model, prompt, istoric, **kw):
++        apeluri.append(client)
++        if client == "k1":
++            raise Eroare429("RESOURCE_EXHAUSTED")
++        return "ok"
++
++    monkeypatch.setattr(audio_loop, "agent_loop_streaming", fals)
++    monkeypatch.setattr(audio_loop.time, "sleep", lambda s: None)
++    rot = audio_loop._RotatieClienti(["k1", "k2"])
++    istoric = ["u"]
++    r = audio_loop._agent_streaming_cu_fallback_chei(rot, "m", "p", istoric, 0, lambda p: None, None)
++    assert r == "ok" and apeluri == ["k1", "k2"]
++
++
++# ── server: confirmări prin WebSocket ─────────────────────────────────────────
++def test_server_confirmare_prin_ws_aproba_si_refuza():
++    pytest.importorskip("fastapi")
++    try:
++        from src.ui import server
++    except Exception as e:  # dependențe grele lipsă (chromadb etc.)
++        pytest.skip(f"server.py nu se poate importa aici: {e}")
++
++    mesaje = []
++
++    async def fals_broadcast(m):
++        mesaje.append(m)
++        id_conf = m["id"]
++        server._confirmari[id_conf]["aprobat"] = m["functie"] == "git_commit"
++        server._confirmari[id_conf]["event"].set()
++
++    loop = asyncio.new_event_loop()
++    t = threading.Thread(target=loop.run_forever, daemon=True)
++    t.start()
++    server._loop_principal = loop
++    server.conexiuni_active.append(object())
++    original = server.broadcast
++    server.broadcast = fals_broadcast
++    try:
++        assert server._confirma_prin_ws("git_commit", {"mesaj": "x"}) is True
++        assert server._confirma_prin_ws("git_push", {}) is False
++        assert not server._confirmari
++    finally:
++        server.broadcast = original
++        server.conexiuni_active.clear()
++        server._loop_principal = None
++        loop.call_soon_threadsafe(loop.stop)
++
++
++def test_server_refuza_fara_client_conectat():
++    try:
++        from src.ui import server
++    except Exception as e:
++        pytest.skip(f"server.py nu se poate importa aici: {e}")
++    server.conexiuni_active.clear()
++    assert server._confirma_prin_ws("git_push", {}) is False

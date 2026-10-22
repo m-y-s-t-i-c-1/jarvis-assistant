@@ -27,6 +27,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TIMEOUT_PER_APEL = 18
+# FIX: la cod, cererile sunt non-streaming cu max_tokens 16384 pe modele de reasoning —
+# 18 s nu ajung, deci răspunsurile lungi expirau mereu. Timeout propriu, mai mare, plus un
+# plafon pentru TOATĂ cascada (altfel 3 chei × 3 modele × timeout = minute până la Gemini).
+TIMEOUT_COD = 60
+DEADLINE_CASCADA_COD = 100
+
+_MESAJ_TAIAT = "\n\n[Răspunsul a fost tăiat de limita de lungime.]"
 
 _NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
@@ -62,7 +69,7 @@ _CONFIG_CONVERSATIE = [
         "params": {
             "temperature": 0.2,
             "top_p": 0.7,
-            "max_tokens": 1024
+            "max_tokens": 4096  # FIX: era 1024 -> răspunsuri tăiate la jumătate
         }
     },
     {
@@ -90,9 +97,13 @@ _nvidia_chei_conversatie = [
 ]
 _nvidia_chei_conversatie = [k for k in _nvidia_chei_conversatie if k]
 
-# Cuplăm fiecare cheie cu modelul ei specific
+# Cuplăm fiecare cheie cu modelul ei specific.
+# FIX: cu mai puține chei decât modele (ex. 1 cheie), nu exista cascadă de modele: pool-ul
+# avea câte o intrare per cheie. Acum are max(chei, modele) intrări, chei refolosite ciclic.
 _pool_conversatie = []
-for i, cheie in enumerate(_nvidia_chei_conversatie):
+_nr_intrari_pool = max(len(_nvidia_chei_conversatie), len(_CONFIG_CONVERSATIE)) if _nvidia_chei_conversatie else 0
+for i in range(_nr_intrari_pool):
+    cheie = _nvidia_chei_conversatie[i % len(_nvidia_chei_conversatie)]
     config = _CONFIG_CONVERSATIE[i % len(_CONFIG_CONVERSATIE)]
     _pool_conversatie.append({
         "cheie": cheie,
@@ -191,6 +202,7 @@ def _apel_chat_openai(
     extra_body: dict | None = None,
     frequency_penalty: float | None = None,
     presence_penalty: float | None = None,
+    timeout: float | None = None,
 ) -> dict | Any | None:
     """Helper generic — POST {base_url}/chat/completions."""
     payload: dict[str, Any] = {
@@ -212,21 +224,22 @@ def _apel_chat_openai(
         "Content-Type": "application/json",
     }
 
+    timeout = timeout or TIMEOUT_PER_APEL
     _start = time.perf_counter()
     try:
         if stream:
             headers["Accept"] = "text/event-stream"
-            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL, stream=True)
+            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout, stream=True)
             raspuns.raise_for_status()
             print(f"[TIMP] NVIDIA '{model}' — până la primul byte (streaming): {time.perf_counter() - _start:.2f}s")
             return raspuns.iter_lines()
         else:
-            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=TIMEOUT_PER_APEL)
+            raspuns = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload, timeout=timeout)
             raspuns.raise_for_status()
             print(f"[TIMP] NVIDIA '{model}' — răspuns complet: {time.perf_counter() - _start:.2f}s")
             return raspuns.json()
     except requests.exceptions.Timeout:
-        print(f"[NVIDIA] Timeout ({TIMEOUT_PER_APEL}s) pentru '{model}'")
+        print(f"[NVIDIA] Timeout ({timeout}s) pentru '{model}'")
         return None
     except requests.exceptions.HTTPError as e:
         print(f"[NVIDIA] HTTP {e.response.status_code} pentru '{model}': {e.response.text[:200]}")
@@ -259,9 +272,18 @@ def _extrage_continut(date: dict) -> str | None:
         return None
 
 
+def _a_fost_taiat(date) -> bool:
+    """True dacă răspunsul s-a oprit din cauza max_tokens (finish_reason == "length")."""
+    try:
+        return date["choices"][0].get("finish_reason") == "length"
+    except Exception:
+        return False
+
+
 def _proceseaza_stream(stream_generator) -> str:
     continut_final = []
     reasoning_final = []
+    taiat = False
 
     try:
         for line in stream_generator:
@@ -274,6 +296,8 @@ def _proceseaza_stream(stream_generator) -> str:
                 chunk = json.loads(line_decoded)
                 if not chunk.get("choices"): continue
                 delta = chunk["choices"][0].get("delta", {})
+                if chunk["choices"][0].get("finish_reason") == "length":
+                    taiat = True
 
                 reasoning = delta.get("reasoning_content")
                 if reasoning: reasoning_final.append(reasoning)
@@ -288,7 +312,11 @@ def _proceseaza_stream(stream_generator) -> str:
     if reasoning_final:
         print(f"[NVIDIA] Reasoning capturat ({len(''.join(reasoning_final))} caractere)")
 
-    return "".join(continut_final)
+    text = "".join(continut_final)
+    if taiat and text:
+        print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
+        text += _MESAJ_TAIAT
+    return text
 
 
 def intreaba_nvidia_conversatie(
@@ -334,7 +362,11 @@ def intreaba_nvidia_conversatie(
             return _proceseaza_stream(rezultat)
         else:
             content = _extrage_continut(rezultat)
-            if content: return content
+            if content:
+                if _a_fost_taiat(rezultat):
+                    print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
+                    content += _MESAJ_TAIAT
+                return content
 
     print(f"[NVIDIA] Toate cele {len(_pool_conversatie)} combinații au eșuat.")
     return None
@@ -359,8 +391,12 @@ def intreaba_nvidia_cod(
         "seed": 42
     }
 
+    _start_cascada = time.perf_counter()
     for index_cheie, cheie in enumerate(_nvidia_chei_coding):
         for model in _MODELE_CODING:
+            if time.perf_counter() - _start_cascada > DEADLINE_CASCADA_COD:
+                print(f"[NVIDIA] Cascada de cod a depășit {DEADLINE_CASCADA_COD}s — las fallback-ul (Gemini) să preia.")
+                return None
             if model in _modele_nvidia_retrase:
                 print(f"[NVIDIA] Sar peste coding '{model}' (marcat anterior ca retras — 410 Gone)")
                 continue
@@ -368,7 +404,8 @@ def intreaba_nvidia_cod(
             print(f"[NVIDIA] Apelează Coding (cheie #{index_cheie + 1}): Model '{model}'")
             try:
                 rezultat = _apel_chat_openai(
-                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=stream, **params
+                    _NVIDIA_BASE_URL, cheie, model, mesaje, stream=stream,
+                    timeout=TIMEOUT_COD, **params
                 )
             except LimitaDeRataNvidia as e:
                 # Toate modelele din bucla interioară folosesc ACEEAȘI
@@ -380,6 +417,9 @@ def intreaba_nvidia_cod(
             if rezultat:
                 continut = _proceseaza_stream(rezultat) if stream else _extrage_continut(rezultat)
                 if continut:
+                    if not stream and _a_fost_taiat(rezultat):
+                        print("[NVIDIA] Răspuns tăiat de max_tokens (finish_reason=length).")
+                        continut += _MESAJ_TAIAT
                     return continut
 
     return None

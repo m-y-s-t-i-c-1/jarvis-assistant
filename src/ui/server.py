@@ -32,6 +32,7 @@ from src.core.database import db
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.context_manager import proceseaza as proceseaza_context
+from src.core.security import canal_confirmare
 from google import genai
 from google.genai import types
 
@@ -56,7 +57,16 @@ _ORIGINI_PERMISE = {
     f"http://localhost:{PORT}", f"http://127.0.0.1:{PORT}",
     *[o.strip() for o in os.getenv("JARVIS_ALLOWED_ORIGINS", "").split(",") if o.strip()],
 }
-ERORI_FALLBACK = (503, 429, 500, 403)
+ERORI_FALLBACK = (503, 429, 500, 502, 504, 403)  # FIX: lipseau 502 și 504 (existente în main.py)
+
+# FIX: uneltele cu necesita_confirmare (git_commit, git_push, click_la_pozitie, creeaza_eveniment...)
+# nu puteau fi folosite din UI: nu exista canal de confirmare -> input() bloca thread-ul (cu lock-ul
+# ținut, deci tot UI-ul îngheța) sau acțiunea era refuzată automat. Acum confirmarea se cere în
+# browser/widget prin WebSocket (mesaj "confirmare" -> răspuns {"tip": "confirmare", "id", "aprobat"}).
+TIMEOUT_CONFIRMARE = 60  # secunde; fără răspuns => refuz (fail closed)
+_confirmari: dict[str, dict] = {}
+_loop_principal: asyncio.AbstractEventLoop | None = None
+_taskuri_mesaje: set = set()
 
 # FIX: `istoric` e global și e modificat din thread-uri de executor —
 # două mesaje simultane se intercalau și corupeau istoricul.
@@ -125,8 +135,40 @@ def ruleaza_agent(mesaj_user: str) -> str:
     # (apărea ca un TypeError confuz).
     if not _gemini_clienti:
         return "Nu există nicio GEMINI_API_KEY configurată în .env."
-    with _LOCK_AGENT:
+    with _LOCK_AGENT, canal_confirmare(_confirma_prin_ws):
         return _ruleaza_agent_blocat(mesaj_user)
+
+
+def _confirma_prin_ws(nume_functie: str, argumente: dict) -> bool:
+    """Cere confirmarea utilizatorului în UI (WebSocket). Rulează în thread-ul agentului."""
+    import uuid
+    if _loop_principal is None or not conexiuni_active:
+        print("[Securitate] Niciun client UI conectat pentru confirmare — acțiune refuzată.")
+        return False
+
+    id_conf = uuid.uuid4().hex[:12]
+    intrare = {"event": threading.Event(), "aprobat": False}
+    _confirmari[id_conf] = intrare
+    try:
+        asyncio.run_coroutine_threadsafe(
+            broadcast({
+                "tip": "confirmare",
+                "id": id_conf,
+                "functie": nume_functie,
+                "argumente": {str(k): str(v)[:300] for k, v in (argumente or {}).items()},
+                "timeout": TIMEOUT_CONFIRMARE,
+            }),
+            _loop_principal,
+        ).result(timeout=5)
+        if not intrare["event"].wait(TIMEOUT_CONFIRMARE):
+            print(f"[Securitate] Confirmare expirată pentru '{nume_functie}' — acțiune refuzată.")
+            return False
+        return bool(intrare["aprobat"])
+    except Exception as e:
+        print(f"[Securitate] Confirmarea din UI a eșuat ({e}) — acțiune refuzată.")
+        return False
+    finally:
+        _confirmari.pop(id_conf, None)
 
 
 def _anuleaza_tura(mesaj_curent) -> None:
@@ -226,6 +268,40 @@ async def api_history():
     return {"mesaje": mesaje[-20:]}
 
 
+async def _proceseaza_mesaj(text_user: str):
+    await broadcast({"tip": "status", "stare": "thinking"})
+
+    loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
+    try:
+        raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
+    except Exception as e:
+        raspuns = f"Eroare: {str(e)[:200]}"
+        await broadcast({"tip": "eroare", "text": raspuns})
+        await broadcast({"tip": "status", "stare": "idle"})
+        return
+
+    # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
+    # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
+    def _persista():
+        db.salveaza_mesaj(sesiune_id, "user", text_user)
+        db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
+        rag.indexeaza_mesaj("user", text_user, sesiune_id)
+        rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
+
+    try:
+        await loop.run_in_executor(None, _persista)
+    except Exception as e:
+        print(f"[Memorie] Salvare/indexare eșuată: {e}")
+
+    await broadcast({
+        "tip":    "raspuns",
+        "text":   raspuns,
+        "user":   text_user,
+        "status": "done",
+    })
+    await broadcast({"tip": "status", "stare": "idle"})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     # Blochează cross-site WebSocket hijacking: acceptă doar origini locale
@@ -237,6 +313,8 @@ async def websocket_endpoint(ws: WebSocket):
         await ws.close(code=1008)
         return
     await ws.accept()
+    global _loop_principal
+    _loop_principal = asyncio.get_running_loop()
     conexiuni_active.append(ws)
     print(f"[WS] Client conectat. Total: {len(conexiuni_active)}")
 
@@ -262,42 +340,22 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_text(json.dumps({"tip": "pong"}))
                 continue
 
+            if tip == "confirmare":
+                intrare = _confirmari.get(str(payload.get("id", "")))
+                if intrare is not None:
+                    intrare["aprobat"] = payload.get("aprobat") is True
+                    intrare["event"].set()
+                continue
+
             if tip == "mesaj":
                 text_user = payload.get("text", "").strip()
                 if not text_user:
                     continue
-
-                await broadcast({"tip": "status", "stare": "thinking"})
-
-                loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
-                try:
-                    raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
-                except Exception as e:
-                    raspuns = f"Eroare: {str(e)[:200]}"
-                    await broadcast({"tip": "eroare", "text": raspuns})
-                    await broadcast({"tip": "status", "stare": "idle"})
-                    continue
-
-                # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
-                # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
-                def _persista():
-                    db.salveaza_mesaj(sesiune_id, "user", text_user)
-                    db.salveaza_mesaj(sesiune_id, "assistant", raspuns)
-                    rag.indexeaza_mesaj("user", text_user, sesiune_id)
-                    rag.indexeaza_mesaj("assistant", raspuns, sesiune_id)
-
-                try:
-                    await loop.run_in_executor(None, _persista)
-                except Exception as e:
-                    print(f"[Memorie] Salvare/indexare eșuată: {e}")
-
-                await broadcast({
-                    "tip":    "raspuns",
-                    "text":   raspuns,
-                    "user":   text_user,
-                    "status": "done",
-                })
-                await broadcast({"tip": "status", "stare": "idle"})
+                # FIX: tura rula în acest handler (await), deci bucla de recepție era blocată și
+                # răspunsul de confirmare al utilizatorului nu putea fi citit. O rulăm ca task.
+                task = asyncio.create_task(_proceseaza_mesaj(text_user))
+                _taskuri_mesaje.add(task)
+                task.add_done_callback(_taskuri_mesaje.discard)
 
     except WebSocketDisconnect:
         if ws in conexiuni_active:

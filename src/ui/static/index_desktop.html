@@ -398,6 +398,43 @@ requestAnimationFrame(wAnimate);
 // ── WebSocket ──────────────────────────────────────────────────────────────
 let ws, retry;
 
+// ── Confirmare acțiuni periculoase (git commit/push, click, calendar...) ─────
+function arataConfirmare(d) {
+  const veche = document.getElementById('jarvis-confirm');
+  if (veche) veche.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'jarvis-confirm';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;font-family:inherit;';
+  const card = document.createElement('div');
+  card.style.cssText = 'background:#101826;color:#e6f1ff;border:1px solid #2b6cb0;border-radius:10px;padding:16px;max-width:90%;width:420px;max-height:80%;overflow:auto;font-size:13px;';
+  const titlu = document.createElement('div');
+  titlu.style.cssText = 'font-weight:600;margin-bottom:8px;';
+  titlu.textContent = '⚠️ Jarvis vrea să execute: ' + d.functie;
+  const corp = document.createElement('pre');
+  corp.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:0 0 12px;font-size:12px;';
+  corp.textContent = Object.entries(d.argumente || {}).map(([k, v]) => k + ': ' + v).join('\n') || '(fără argumente)';
+  const butoane = document.createElement('div');
+  butoane.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+  const raspunde = (aprobat) => {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ tip: 'confirmare', id: d.id, aprobat: aprobat }));
+    overlay.remove();
+  };
+  const nu = document.createElement('button');
+  nu.textContent = 'Refuză';
+  nu.style.cssText = 'padding:6px 14px;border-radius:6px;border:1px solid #4a5568;background:transparent;color:inherit;cursor:pointer;';
+  nu.onclick = () => raspunde(false);
+  const da = document.createElement('button');
+  da.textContent = 'Aprobă';
+  da.style.cssText = 'padding:6px 14px;border-radius:6px;border:0;background:#2b6cb0;color:#fff;cursor:pointer;';
+  da.onclick = () => raspunde(true);
+  butoane.append(nu, da);
+  card.append(titlu, corp, butoane);
+  overlay.append(card);
+  document.body.appendChild(overlay);
+  setTimeout(() => { if (overlay.isConnected) raspunde(false); }, ((d.timeout || 60) * 1000));
+}
+
+
 function connect() {
   ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => {
@@ -413,6 +450,8 @@ function connect() {
       wSetState('idle');
     } else if (d.tip === 'status') {
       wSetState(d.stare);
+    } else if (d.tip === 'confirmare') {
+      arataConfirmare(d);
     } else if (d.tip === 'eroare') {
       removeThinking();
       wSetState('idle');

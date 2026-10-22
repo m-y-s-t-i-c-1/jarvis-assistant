@@ -55,8 +55,14 @@ class _RotatieSigura:
     """
 
     def __init__(self, elemente):
+        elemente = list(elemente)
+        self._n = len(elemente)
         self._ciclu = itertools.cycle(elemente)
         self._lock = threading.Lock()
+
+    def __len__(self):
+        # Folosit de modulele vocale ca să știe câte chei să încerce înainte să renunțe.
+        return self._n
 
     def __iter__(self):
         return self
@@ -180,7 +186,7 @@ def groq_fallback(istoric: list, system_prompt: str) -> str:
     raspuns = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=mesaje,
-        max_tokens=1024,
+        max_tokens=4096,  # FIX: 1024 tăia răspunsurile lungi
     )
     # FIX: content poate fi None (ex. răspuns blocat) -> returnam sir gol
     # in loc de None, ca sa nu crape mai departe la print/DB/RAG.
@@ -606,7 +612,12 @@ def main():
     threading.Thread(target=_bucla_alerte, daemon=True).start()
 
     porneste_thread_watcher()
-    porneste_monitorizare_ecran(_la_schimbare_ecran)
+    # FIX: monitorul de ecran pornea mereu și nu putea fi oprit; trimite periodic screenshot-uri
+    # întregi către un API extern (cotă + confidențialitate). JARVIS_MONITOR_ECRAN=0 îl dezactivează.
+    if os.getenv("JARVIS_MONITOR_ECRAN", "1").strip().lower() not in ("0", "false", "nu", "off", "no"):
+        porneste_monitorizare_ecran(_la_schimbare_ecran)
+    else:
+        print("[Monitor Ecran] Dezactivat din .env (JARVIS_MONITOR_ECRAN=0).")
     porneste_monitorizare_log(_la_eroare_log)
     istoric = []
     sesiune_id = db.incepe_sesiune()
@@ -635,7 +646,13 @@ def main():
         return
 
     if alegere in ("2", "voce"):
-        from src.core.wake_word import porneste_cu_wake_word
+        # FIX: importul crăpa cu traceback dacă lipseau sounddevice / openwakeword.
+        try:
+            from src.core.wake_word import porneste_cu_wake_word
+        except Exception as e:
+            print(f"[Voce] Modul vocal indisponibil (dependențe audio lipsă?): {e}")
+            db.inchide_sesiune(sesiune_id)
+            return
         try:
             porneste_cu_wake_word(
                 istoric=istoric,
@@ -650,24 +667,12 @@ def main():
             db.inchide_sesiune(sesiune_id)
 
     elif alegere in ("3", "ambele"):
-        from src.core.wake_word import porneste_cu_wake_word
-
-        threading.Thread(
-            target=porneste_cu_wake_word,
-            kwargs={
-                "istoric": istoric,
-                "rotatie_clienti": _gemini_rotatie,
-                "model_gemini": GEMINI_MODEL,
-                "sesiune_id": sesiune_id,
-            },
-            daemon=True,
-        ).start()
-        print("[Modul vocal pornit în fundal. Poți folosi și terminalul.]\n")
+        # FIX: folosește helper-ul tolerant (nu mai crapă dacă lipsesc dependențele audio).
+        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
         bucla_text(istoric, sesiune_id, system_prompt)
 
     else:
-        # Modul implicit [1]: text în terminal + ascultare pasivă în fundal (Task 6.8).
-        _porneste_ascultare_pasiva_daca_posibil(istoric, _gemini_rotatie, GEMINI_MODEL, sesiune_id)
+        # FIX: modul [1] era identic cu [3] (pornea și microfonul), deși e „doar text".
         bucla_text(istoric, sesiune_id, system_prompt)
 
 

@@ -58,7 +58,13 @@ CUVINTE_UNELTE = (
     "data de azi", "data de astăzi", "data de astazi", "data curentă", "data curenta",
     "care e data", "care este data",
     # joburi fundal
-    "job", "rulează în fundal", "ruleaza in fundal",
+    "job", "job*", "rulează în fundal", "ruleaza in fundal",
+    # FIX: întrebări de info sistem care au unealtă (ruleaza_comanda_info:
+    # lista_fisiere, info_retea, info_sistem, utilizator_curent, procese_active)
+    # dar nu conțineau niciun cuvânt-cheie -> mergeau pe NVIDIA, fără unelte.
+    "fisier*", "fișier*", "director*", "folder*", "ip", "adres* ip", "kernel",
+    "retea*", "rețea*", "proces*", "pe sistem", "versiune* de kernel",
+    "utilizatorul curent",
     # FIX: forme flexionate românești (\"*\" = orice terminație). Înainte \"volumul\",
     # \"calendarul\", \"luminozitatea\", \"procesorul\", \"temperatură\" cădeau pe
     # \"conversatie\" (NVIDIA, fără unelte) și Jarvis nu putea acționa.

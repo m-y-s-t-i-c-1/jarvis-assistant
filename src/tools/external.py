@@ -15,6 +15,7 @@ Calendarul Google (parte separată din Task 2.7) e într-un fișier diferit
 (calendar_google.py), pentru că necesită OAuth și e mai complex.
 """
 
+import os
 import requests
 from src.core.registry import unealta
 
@@ -51,17 +52,20 @@ def _descrie_vreme(cod: int) -> str:
     description=(
         "Returnează vremea curentă și prognoza pentru un oraș sau localitate. "
         "Folosește pentru 'ce vreme e în X?', 'cum e afară?', 'plouă mâine?' etc. "
-        "Dacă utilizatorul nu specifică un oraș, presupune Chișinău, Moldova."
+        "Dacă utilizatorul nu specifică un oraș, lasă parametrul gol (se folosește orașul implicit configurat)."
     ),
     parameters={
         "oras": {
             "type": "STRING",
-            "description": "Numele orașului sau localității. Ex: 'Chișinău', 'București', 'Iași'.",
+            "description": "Numele orașului sau localității. Ex: 'Chișinău', 'București', 'Iași'. Gol = orașul implicit.",
+            "optional": True,
         }
     },
 )
-def vremea(oras: str = "Chișinău"):
+def vremea(oras: str = ""):
     """Vremea curentă pentru un oraș, via Open-Meteo (geocoding + forecast)."""
+    # FIX: orașul implicit era hardcodat „Chișinău". Acum se citește din .env (JARVIS_ORAS).
+    oras = (oras or "").strip() or os.getenv("JARVIS_ORAS", "Chișinău")
     try:
         # Pasul 1: geocoding — transformăm numele orașului în coordonate
         geo_raspuns = requests.get(
