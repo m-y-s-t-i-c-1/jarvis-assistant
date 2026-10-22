@@ -134,7 +134,13 @@ def proceseaza(
     print(f"[Context] Fereastra depășită ({len(istoric)} mesaje) — rezum primele {BLOC_REZUMARE}...")
 
     mesaje_vechi = istoric[:BLOC_REZUMARE]
-    istoric_nou   = _taie_la_granita_valida(istoric[BLOC_REZUMARE:])
+    ramase_brut  = istoric[BLOC_REZUMARE:]
+    istoric_nou  = _taie_la_granita_valida(ramase_brut)
+    # FIX: mesajele eliminate de _taie_la_granita_valida dispăreau fără să fie rezumate;
+    # le adăugăm la blocul care se rezumă.
+    taiate = len(ramase_brut) - len(istoric_nou)
+    if taiate > 0:
+        mesaje_vechi = mesaje_vechi + ramase_brut[:taiate]
 
     if client:
         text_rezumat = _genereaza_rezumat(client, model, mesaje_vechi)

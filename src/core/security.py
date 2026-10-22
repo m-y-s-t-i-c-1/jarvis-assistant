@@ -106,6 +106,11 @@ BLACKLIST_PATTERNS = [
     r"\bgit\s+reset\s+--hard\b",
     r"\bgit\s+clean\s+-\w*f",
     r"\bshred\b",
+    # Adăugate: formele de mkfs/dd/interpretoare care ocoleau regulile de mai sus
+    r"\bmkfs\b",                                   # mkfs fără punct (mkfs /dev/sdb1)
+    r"\bdd\b[^\n]*\bof=/dev/",                      # dd of=/dev/... indiferent de ordinea argumentelor
+    r"\b(node|nodejs|perl|ruby|php)\s+(?:-\w+\s+)*-[eE]\b",  # interpretor cu cod inline
+    r"\bpython[\d.]*\s+(?:-[\w.]+\s+)*-\w*c\b",       # python -c, cu sau fără ghilimele
     r"\bfind\b.*\s-delete\b",
     r"\bfind\b.*-exec\s+rm\b",   # FIX: ocolea regula de mai sus
 ]
@@ -144,6 +149,10 @@ _PARAMETRI_TEXT_LIBER = {
     # FIX: calea e pasată lui `code` ca argument (cu `--`), nu interpretată de shell:
     # „halt.py" nu trebuie blocat ca „halt".
     "deschide_vscode": {"cale"},
+    # FIX: nume de fișiere/branch-uri/foldere ("halt.py", "fix/shutdown-bug") erau blocate ca
+    # „shutdown/halt". Sunt trimise ca argumente separate (fără shell), nu interpretate ca comandă.
+    "git_add": {"fisiere"}, "git_checkout": {"branch"},
+    "git_push": {"remote", "branch"}, "porneste_server_http": {"folder"},
 }
 
 # Unelte care tastează text liber: oprirea sistemului se blochează doar când textul
@@ -268,7 +277,8 @@ def trece_prin_securitate(
         if nume_functie not in _FUNCTII_FARA_SAFETY_NET:
             # FIX: checkpoint-ul se făcea mereu în directorul curent, nu în repo-ul
             # pe care operează unealta (parametrul `cale_repo`).
-            cale_repo = argumente.get("cale_repo") or "."
+            # FIX 2: porneste_job_fundal primește `director`, nu `cale_repo` -> checkpoint în repo-ul greșit.
+            cale_repo = argumente.get("cale_repo") or argumente.get("director") or "."
             creeaza_checkpoint(motiv=f"înainte de {nume_functie}({argumente})", cale_repo=str(cale_repo))
 
     return True, ""

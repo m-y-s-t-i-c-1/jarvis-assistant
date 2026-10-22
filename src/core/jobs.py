@@ -151,7 +151,7 @@ class JobManager:
 manager_joburi = JobManager()
 
 
-def porneste_thread_watcher(interval_secunde: float = 2.0):
+def porneste_thread_watcher(interval_secunde: float = 2.0, la_job_terminat=None):
     """
     Pornește thread-ul care verifică periodic joburile terminate și le
     afișează proactiv în terminal. Apelat o singură dată din main.py,
@@ -170,6 +170,11 @@ def porneste_thread_watcher(interval_secunde: float = 2.0):
                     end="",
                     flush=True,
                 )
+                if la_job_terminat is not None:
+                    try:
+                        la_job_terminat(job)
+                    except Exception as e:
+                        print(f"[Joburi] Callback-ul de anunț a eșuat: {e}")
 
     thread = threading.Thread(target=bucla_watcher, daemon=True)
     thread.start()

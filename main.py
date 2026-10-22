@@ -163,6 +163,10 @@ def _este_eroare_temporara(e: Exception) -> bool:
         return True
 
     mesaj_upper = mesaj_eroare.upper()
+    # FIX: o cheie invalidă/expirată vine ca 400 INVALID_ARGUMENT („API key not valid" /
+    # API_KEY_INVALID / „API key expired"); nu e fatală pentru tură — încercăm cheia următoare.
+    if re.search(r"API[ _]KEY[ _](NOT VALID|INVALID|EXPIRED)", mesaj_upper):
+        return True
     return any(marcaj in mesaj_upper for marcaj in _MARCAJE_TEMPORARE)
 
 
@@ -364,6 +368,8 @@ def ruleaza_cu_fallback(istoric: list, system_prompt: str) -> str:
 
 # Previne pornirea a două consolidări simultane (ex. la mesaje rapide).
 _lock_consolidare = threading.Lock()
+_ture_text = 0
+CONSOLIDARE_LA_N_TURE = 5
 
 
 def _consolidare_in_fundal(client):
@@ -471,8 +477,11 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
 
             # Consolidare autonomă la fiecare 10 mesaje (în fundal)
             try:
-                stats = db.statistici()
-                if stats["mesaje_total"] > 0 and stats["mesaje_total"] % 10 == 0:
+                # FIX: `mesaje_total % 10` din DB sărea peste prag cu thread-uri concurente (text + voce);
+                # folosim un contor de ture, ca în persistenta_tura.py.
+                global _ture_text
+                _ture_text += 1
+                if _ture_text % CONSOLIDARE_LA_N_TURE == 0:
                     threading.Thread(
                         target=_consolidare_in_fundal,
                         args=(urmatorul_client(),),
@@ -531,6 +540,12 @@ def _bucla_alerte():
 def _rosteste_alerta_pe_thread(mesaj: str, eticheta: str) -> None:
     """Pune alerta la coadă — vorbită de _bucla_alerte, doar când nu ești în mijlocul unei conversații."""
     _coada_alerte.put((mesaj, eticheta))
+
+
+def _anunta_job_vocal(job) -> None:
+    """FIX: jobul terminat era doar afișat în terminal; acum e și rostit (pe coada de alerte)."""
+    stare = "s-a terminat" if job.status.name == "TERMINAT" else "a eșuat"
+    _rosteste_alerta_pe_thread(f"Vasea, jobul {job.descriere} {stare}.", "job")
 
 
 def _la_schimbare_ecran():
@@ -611,7 +626,7 @@ def main():
     # în main(), deci `import main` nu mai declanșează pornirea aplicației.
     threading.Thread(target=_bucla_alerte, daemon=True).start()
 
-    porneste_thread_watcher()
+    porneste_thread_watcher(la_job_terminat=_anunta_job_vocal)
     # FIX: monitorul de ecran pornea mereu și nu putea fi oprit; trimite periodic screenshot-uri
     # întregi către un API extern (cotă + confidențialitate). JARVIS_MONITOR_ECRAN=0 îl dezactivează.
     if os.getenv("JARVIS_MONITOR_ECRAN", "1").strip().lower() not in ("0", "false", "nu", "off", "no"):

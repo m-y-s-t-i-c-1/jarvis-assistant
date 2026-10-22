@@ -228,3 +228,7 @@ token.json
 /rulează
 /lansează
 /jarvis-assistant/
+
+# Fișiere de editor / patch-uri locale
+*.code-workspace
+*.patch

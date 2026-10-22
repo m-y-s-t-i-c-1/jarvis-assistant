@@ -36,9 +36,12 @@ _PATTERN_NEGATIE = re.compile(r"\b(nu|n-am|n-a|anulat|refuzat|blocat|imposibil)\
 
 
 def _raspunsul_pare_suspect(text: str) -> bool:
-    if _PATTERN_NEGATIE.search(text):
-        return False
-    return bool(_PATTERN_HALUCINATIE.search(text))
+    # FIX: înainte, orice „nu" din răspuns (oriunde) dezactiva verificarea pe tot textul.
+    # Acum negația contează doar în aceeași propoziție cu semnalul suspect.
+    for propozitie in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+        if _PATTERN_HALUCINATIE.search(propozitie) and not _PATTERN_NEGATIE.search(propozitie):
+            return True
+    return False
 
 
 def _extrage_continut(raspuns):
@@ -118,7 +121,10 @@ def agent_loop(
     a_facut_deja_retry_fortat = False
     a_folosit_tool_in_aceasta_tura = False
 
-    for pas in range(MAX_PASI):
+    # FIX: după MAX_PASI runde de unelte, rezultatele ultimei runde rămâneau fără răspuns al modelului
+    # (istoric terminat cu function_response) și utilizatorul primea doar „buclă lungă". Dăm un
+    # pas suplimentar FĂRĂ unelte, ca modelul să formuleze răspunsul final din ce a aflat.
+    for pas in range(MAX_PASI + 1):
         # Construim o sesiune de chat pe baza istoricului (toate mesajele
         # anterioare, mai puțin ultimul) și trimitem ultimul mesaj prin
         # `send_message`. Astfel respectăm recomandarea SDK-ului pentru Chat.
@@ -128,7 +134,7 @@ def agent_loop(
             history=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                tools=unelte if unelte else None,
+                tools=unelte if (unelte and pas < MAX_PASI) else None,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
@@ -159,6 +165,7 @@ def agent_loop(
             # bazat pe date reale, nu are sens să forțăm alt tool arbitrar)
             if (
                 unelte
+                and pas < MAX_PASI
                 and not a_facut_deja_retry_fortat
                 and not a_folosit_tool_in_aceasta_tura
                 and _raspunsul_pare_suspect(text_raspuns)
@@ -284,7 +291,13 @@ def agent_loop(
 # un chunk poate să se termine exact după un punct dintr-un număr ("3." + "14"),
 # iar Jarvis rostea "3." ca propoziție separată. Cerem spațiu după punctuație;
 # ultima propoziție rămâne oricum rostită din `buffer_text` la finalul stream-ului.
-_PATTERN_SFARSIT_PROPOZITIE = re.compile(r'[.!?]+[”"\')\]]?\s+')
+# FIX: nu tăia după abrevieri frecvente („etc.", „dr.", „ex.") și nici după o cifră singură („1. ").
+_PATTERN_SFARSIT_PROPOZITIE = re.compile(
+    r'(?<!\betc)(?<!\bdr)(?<!\bdra)(?<!\bex)(?<!\bnr)(?<!\bstr)(?<!\bprof)(?<!\bing)'
+    r'(?<!\bvs)(?<!\bd-l)(?<!\bd-na)(?<!\bpt)(?<!\bcca)(?<!\b\d)'
+    r'[.!?]+[”"\')\]]?\s+',
+    re.IGNORECASE,
+)
 
 
 def _uneste_parti_stream(parti: list):
@@ -368,14 +381,17 @@ def agent_loop_streaming(
     """
     unelte = get_unelte_pentru_gemini(doar_functiile=unelte_permise)
 
-    for pas in range(MAX_PASI):
+    # FIX: după MAX_PASI runde de unelte, rezultatele ultimei runde rămâneau fără răspuns al modelului
+    # (istoric terminat cu function_response) și utilizatorul primea doar „buclă lungă". Dăm un
+    # pas suplimentar FĂRĂ unelte, ca modelul să formuleze răspunsul final din ce a aflat.
+    for pas in range(MAX_PASI + 1):
         history = istoric[:-1] if len(istoric) > 1 else []
         chat = client.chats.create(
             model=model,
             history=history,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                tools=unelte if unelte else None,
+                tools=unelte if (unelte and pas < MAX_PASI) else None,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),

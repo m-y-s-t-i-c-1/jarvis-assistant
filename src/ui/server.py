@@ -33,6 +33,8 @@ from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.context_manager import proceseaza as proceseaza_context
 from src.core.security import canal_confirmare
+from src.core.context_rag import prompt_pentru_tura
+from src.core.jobs import porneste_thread_watcher
 from google import genai
 from google.genai import types
 
@@ -127,6 +129,9 @@ def _e_eroare_de_fallback(eroare) -> bool:
         if isinstance(cod, int) and cod in ERORI_FALLBACK:
             return True
     mesaj_err = str(eroare)
+    # FIX: cheie invalidă/expirată (400) -> încercăm cheia următoare
+    if re.search(r"API[ _]KEY[ _](NOT VALID|INVALID|EXPIRED)", mesaj_err.upper()):
+        return True
     return any(re.search(rf"(?<!\d){c}(?!\d)", mesaj_err) for c in ERORI_FALLBACK)
 
 
@@ -194,7 +199,9 @@ def _ruleaza_agent_blocat(mesaj_user: str) -> str:
         for _ in range(len(_gemini_clienti)):
             client = next(_gemini_rotatie)
             try:
-                raspuns = agent_loop(client, GEMINI_MODEL, SYSTEM_PROMPT, istoric)
+                # FIX: profil + amintiri proaspete + RAG pe tură (înainte: prompt static, calculat la import)
+                prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT_BAZA, SYSTEM_PROMPT, mesaj_user, sesiune_id)
+                raspuns = agent_loop(client, GEMINI_MODEL, prompt_tura, istoric)
             except Exception as e:
                 if _e_eroare_de_fallback(e):
                     time.sleep(0.5)
@@ -268,6 +275,28 @@ async def api_history():
     return {"mesaje": mesaje[-20:]}
 
 
+_ture_ui = 0
+_lock_consolidare_ui = threading.Lock()
+CONSOLIDARE_LA_N_TURE_UI = 5
+
+
+def _memorie_in_fundal(text_user: str, raspuns: str) -> None:
+    """Extrage amintiri din tură și, la fiecare N ture, consolidează memoria. Nu aruncă niciodată."""
+    global _ture_ui
+    try:
+        client = next(_gemini_rotatie)
+        memorie.extrage_si_salveaza(text_user, raspuns, sesiune_id, client, GEMINI_MODEL)
+        _ture_ui += 1
+        if _ture_ui % CONSOLIDARE_LA_N_TURE_UI == 0 and _lock_consolidare_ui.acquire(blocking=False):
+            try:
+                from src.core.consolidare import consolidare
+                consolidare.ruleaza(client=client, model=GEMINI_MODEL)
+            finally:
+                _lock_consolidare_ui.release()
+    except Exception as e:
+        print(f"[Memorie] Extragere/consolidare UI omisă: {e}")
+
+
 async def _proceseaza_mesaj(text_user: str):
     await broadcast({"tip": "status", "stare": "thinking"})
 
@@ -292,6 +321,10 @@ async def _proceseaza_mesaj(text_user: str):
         await loop.run_in_executor(None, _persista)
     except Exception as e:
         print(f"[Memorie] Salvare/indexare eșuată: {e}")
+
+    # FIX: UI-ul nu extrăgea amintiri episodice și nu consolida memoria (main.py o face).
+    if _gemini_clienti:
+        loop.run_in_executor(None, _memorie_in_fundal, text_user, raspuns)
 
     await broadcast({
         "tip":    "raspuns",
@@ -371,6 +404,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 if __name__ == "__main__":
     rag.sincronizeaza_din_db()
+    porneste_thread_watcher()  # FIX: joburile din fundal nu erau anunțate niciodată în UI
     print(f"\n[Jarvis UI Web]     http://localhost:{PORT}  (bind {HOST})")
     print(f"[Jarvis UI Desktop] http://localhost:{PORT}/desktop")
     print(f"[Memorie] {db.statistici()['amintiri']} amintiri | "

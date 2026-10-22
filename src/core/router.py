@@ -63,7 +63,7 @@ CUVINTE_UNELTE = (
     # lista_fisiere, info_retea, info_sistem, utilizator_curent, procese_active)
     # dar nu conțineau niciun cuvânt-cheie -> mergeau pe NVIDIA, fără unelte.
     "fisier*", "fișier*", "director*", "folder*", "ip", "adres* ip", "kernel",
-    "retea*", "rețea*", "proces*", "pe sistem", "versiune* de kernel",
+    "retea*", "rețea*", "proces", "procese", "procesele", "procesul", "pe sistem", "versiune* de kernel",
     "utilizatorul curent",
     # FIX: forme flexionate românești (\"*\" = orice terminație). Înainte \"volumul\",
     # \"calendarul\", \"luminozitatea\", \"procesorul\", \"temperatură\" cădeau pe
@@ -72,6 +72,10 @@ CUVINTE_UNELTE = (
     "procesor*", "ecran*", "sunet*", "prognoz*", "plou*", "vremea",
     "spati* pe disc", "pe disc", "spati* liber*", "memori* ram", "memori* liber*",
     "cat de incarcat", "cat de cald", "cat de incet", "serverul", "commit*",
+    # FIX: cereri care au unealtă dar cădeau pe NVIDIA (fără unelte) -> răspunsuri inventate.
+    "vreme", "cauta pe google", "cauta pe web", "cauta pe net", "cauta pe internet",
+    "mai tare", "mai incet", "mai luminos", "mai intunecat",
+    "memoria", "memorie", "cat de plin*", "stocare",
 )
 
 # Cuvinte care indică o întrebare tehnică / de cod (fără unealtă)

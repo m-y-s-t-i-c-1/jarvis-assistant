@@ -77,6 +77,9 @@ def _eroare_temporara(e: Exception) -> bool:
     mesaj = str(e)
     if any(re.search(rf"(?<!\d){cod}(?!\d)", mesaj) for cod in _ERORI_FALLBACK):
         return True
+    # FIX: cheie invalidă/expirată (400) -> încercăm cheia următoare, ca în main.py
+    if re.search(r"API[ _]KEY[ _](NOT VALID|INVALID|EXPIRED)", mesaj.upper()):
+        return True
     return any(m in mesaj.upper() for m in _MARCAJE_TEMPORARE)
 
 
