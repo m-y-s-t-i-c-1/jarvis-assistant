@@ -18,6 +18,7 @@ Calendarul Google (parte separată din Task 2.7) e într-un fișier diferit
 import os
 import requests
 from src.core.registry import unealta
+from src.core.config import valoare
 
 
 # ==============================================================
@@ -65,7 +66,7 @@ def _descrie_vreme(cod: int) -> str:
 def vremea(oras: str = ""):
     """Vremea curentă pentru un oraș, via Open-Meteo (geocoding + forecast)."""
     # FIX: orașul implicit era hardcodat „Chișinău". Acum se citește din .env (JARVIS_ORAS).
-    oras = (oras or "").strip() or os.getenv("JARVIS_ORAS", "Chișinău")
+    oras = (oras or "").strip() or valoare("locatie", "oras", "Chișinău", env="JARVIS_ORAS")
     try:
         # Pasul 1: geocoding — transformăm numele orașului în coordonate
         geo_raspuns = requests.get(

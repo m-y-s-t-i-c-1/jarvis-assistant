@@ -232,3 +232,6 @@ token.json
 # Fișiere de editor / patch-uri locale
 *.code-workspace
 *.patch
+
+# Configurație locală (șablonul config/jarvis.example.toml e comis)
+config/jarvis.toml

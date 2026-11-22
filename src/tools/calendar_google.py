@@ -17,6 +17,7 @@ IMPORTANT: credentials.json și token.json conțin date private — sunt deja
 import os
 import datetime
 from src.core.registry import unealta
+from src.core.config import valoare
 
 try:
     from google.auth.exceptions import RefreshError
@@ -38,7 +39,7 @@ _CALE_CREDENTIALS = "credentials.json"
 _CALE_TOKEN = "token.json"
 
 # FIX: fusul orar era hardcodat. Configurabil din .env (JARVIS_TIMEZONE), default Chișinău.
-_FUS_ORAR = os.getenv("JARVIS_TIMEZONE", "Europe/Chisinau")
+_FUS_ORAR = valoare("locatie", "fus_orar", "Europe/Chisinau", env="JARVIS_TIMEZONE")
 
 # Serviciul Google Calendar e construit lazy, o singură dată, la prima utilizare
 _service = None

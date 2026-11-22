@@ -5,6 +5,7 @@ import time
 from google.genai import types
 from src.core.registry import get_unelte_pentru_gemini, ruleaza_functie, CONFIRMARE_FUNCTII
 from src.core.security import trece_prin_securitate
+from src.core.config import UTILIZATOR
 
 MAX_PASI = 5  # plasă de siguranță, ca să nu rămânem blocați într-o buclă infinită
 
@@ -69,7 +70,7 @@ def _extrage_continut(raspuns):
         - dacă răspunsul e invalid/gol: (None, [], "text explicativ pentru Vasea")
     """
     if not raspuns.candidates:
-        return None, [], "Vasea, Gemini a blocat complet cererea (posibil filtru de siguranță pe conținut)."
+        return None, [], f"{UTILIZATOR}, Gemini a blocat complet cererea (posibil filtru de siguranță pe conținut)."
 
     candidat = raspuns.candidates[0]
     continut = candidat.content
@@ -81,7 +82,7 @@ def _extrage_continut(raspuns):
         return (
             None,
             [],
-            f"Vasea, am primit un răspuns gol de la Gemini{motiv}. "
+            f"{UTILIZATOR}, am primit un răspuns gol de la Gemini{motiv}. "
             f"Încearcă să reformulezi cererea, sau dacă persistă, "
             f"probabil e legat de conținutul trimis (ex: un screenshot "
             f"care a lovit un filtru de siguranță).",
@@ -543,7 +544,7 @@ def agent_loop_streaming(
         if not text_complet.strip():
             # FIX: audio_loop ignoră valoarea returnată, deci mesajul
             # trebuie rostit prin callback, altfel Jarvis rămâne mut.
-            mesaj = "Vasea, nu am primit niciun răspuns valid. Poți reformula?"
+            mesaj = f"{UTILIZATOR}, nu am primit niciun răspuns valid. Poți reformula?"
             if la_propozitie_gata:
                 la_propozitie_gata(mesaj)
             return mesaj

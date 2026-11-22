@@ -14,6 +14,7 @@ from src.core.agent import agent_loop
 from src.core.jobs import porneste_thread_watcher
 from src.core.context_manager import proceseaza as proceseaza_context
 from src.core.database import db
+from src.core.config import UTILIZATOR, personalizeaza
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.consolidare import consolidare
@@ -93,7 +94,7 @@ GROQ_MODEL   = "llama-3.3-70b-versatile"
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
 
 Reguli de comportament:
-- Te adresezi întotdeauna utilizatorului cu "Vasea".
+- Te adresezi întotdeauna utilizatorului cu "{utilizator}".
 - Tonul tău este calm, profesionist, dar cu un strop de umor sec, britanic.
 - Răspunzi concis și la obiect, fără să divaghezi inutil.
 - Ești proactiv: dacă observi o problemă sau o soluție mai bună, o menționezi.
@@ -115,6 +116,7 @@ Mod vocal:
 - Evită liste cu puncte, simboluri speciale și Markdown în modul vocal.
 - Formulează răspunsuri ca propoziții naturale, de parcă vorbești cu cineva.
 """
+SYSTEM_PROMPT_BAZA = personalizeaza(SYSTEM_PROMPT_BAZA)
 
 # ---- Coduri HTTP care declanșează trecerea la următoarea cheie ----
 # FIX: adăugate 502/504 (gateway) — tot erori temporare, nu fatale.
@@ -235,7 +237,7 @@ def _ruleaza_gemini_apoi_restul(istoric: list, system_prompt: str) -> str:
         return rezultat_extern
 
     return (
-        "Vasea, toți providerii disponibili (Gemini, Groq, OpenRouter, "
+        f"{UTILIZATOR}, toți providerii disponibili (Gemini, Groq, OpenRouter, "
         "NVIDIA NIM, Bytez) sunt indisponibili momentan. Încearcă din nou "
         "peste câteva minute."
     )
@@ -255,11 +257,12 @@ acțiune.
 
 NU pretinde NICIODATĂ, sub nicio formă, că ai executat o acțiune reală
 (fișiere, comenzi de sistem, Git, aplicații etc.) — asta ar fi o informație
-falsă transmisă lui Vasea.
+falsă transmisă lui {utilizator}.
 
 Dacă cererea lui pare să necesite o acțiune reală, spune-i CLAR și DIRECT că
 cererea asta trebuie procesată de asistentul principal (cu unelte), nu te
 preface că ai făcut-o tu."""
+AVERTISMENT_NVIDIA_FARA_UNELTE = personalizeaza(AVERTISMENT_NVIDIA_FARA_UNELTE)
 
 
 def _ultimul_mesaj_utilizator(istoric: list) -> str:
@@ -409,12 +412,12 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
             try:
                 mesaj_utilizator = input("Tu: ")
             except (EOFError, KeyboardInterrupt):
-                print("\nJarvis: La revedere, Vasea.")
+                print(f"\nJarvis: La revedere, {UTILIZATOR}.")
                 break
 
             # FIX: \"stop\" era și răspuns de anulare la confirmări -> ieșea din aplicație
             if mesaj_utilizator.strip().lower() in ("exit", "quit", "/exit"):
-                print("Jarvis: La revedere, Vasea.")
+                print(f"Jarvis: La revedere, {UTILIZATOR}.")
                 break
 
             if not mesaj_utilizator.strip():
@@ -446,12 +449,12 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
                 except Exception as e:
                     # FIX: o eroare fatală (ex. 400/401) nu mai omoară bucla și
                     # nu lasă mesajul utilizatorului "agățat" în istoric.
-                    print(f"Jarvis: Vasea, am întâmpinat o eroare: {str(e)[:200]}")
+                    print(f"Jarvis: {UTILIZATOR}, am întâmpinat o eroare: {str(e)[:200]}")
                     _anuleaza_tura(istoric, mesaj_curent)
                     continue
 
             if not raspuns_text:
-                raspuns_text = "Vasea, nu am primit niciun răspuns de la provideri. Reîncearcă."
+                raspuns_text = f"{UTILIZATOR}, nu am primit niciun răspuns de la provideri. Reîncearcă."
 
             print("Jarvis:", raspuns_text)
 
@@ -545,7 +548,7 @@ def _rosteste_alerta_pe_thread(mesaj: str, eticheta: str) -> None:
 def _anunta_job_vocal(job) -> None:
     """FIX: jobul terminat era doar afișat în terminal; acum e și rostit (pe coada de alerte)."""
     stare = "s-a terminat" if job.status.name == "TERMINAT" else "a eșuat"
-    _rosteste_alerta_pe_thread(f"Vasea, jobul {job.descriere} {stare}.", "job")
+    _rosteste_alerta_pe_thread(f"{UTILIZATOR}, jobul {job.descriere} {stare}.", "job")
 
 
 def _la_schimbare_ecran():
@@ -676,7 +679,7 @@ def main():
                 sesiune_id=sesiune_id,
             )
         except KeyboardInterrupt:
-            print("\nJarvis: La revedere, Vasea.")
+            print(f"\nJarvis: La revedere, {UTILIZATOR}.")
         finally:
             # FIX: în modul vocal sesiunea nu se închidea niciodată.
             db.inchide_sesiune(sesiune_id)

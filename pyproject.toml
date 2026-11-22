@@ -1,0 +1,12 @@
+# Doar configurație de unelte (teste, lint). Proiectul nu se instalează ca pachet.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Doar erori reale: sintaxă (E9), nume nedefinite (F82), comparații/expresii greșite (F63, F7).
+# Regulile de stil (importuri neutilizate etc.) pot fi adăugate treptat.
+select = ["E9", "F63", "F7", "F82"]

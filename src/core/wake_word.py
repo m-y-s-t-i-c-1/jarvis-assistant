@@ -26,6 +26,7 @@ import sounddevice as sd
 from openwakeword.model import Model
 
 from src.core.audio_io import SAMPLE_RATE, DEVICE_IMPLICIT, safe_input_stream
+from src.core.config import UTILIZATOR, personalizeaza
 
 # ── Configurare ───────────────────────────────────────────────────────────────
 
@@ -149,7 +150,7 @@ def porneste_cu_wake_word(
                 pass
 
             try:
-                spune("Ascult, Vasea.")
+                spune(f"Ascult, {UTILIZATOR}.")
             except RuntimeError as e:
                 print(f"[TTS eroare]: {e}")
 

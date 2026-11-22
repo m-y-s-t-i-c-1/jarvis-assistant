@@ -29,6 +29,7 @@ load_dotenv()
 from src import tools  # noqa: F401
 from src.core.agent import agent_loop
 from src.core.database import db
+from src.core.config import UTILIZATOR, personalizeaza
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.context_manager import proceseaza as proceseaza_context
@@ -75,13 +76,14 @@ _taskuri_mesaje: set = set()
 _LOCK_AGENT = threading.Lock()
 
 SYSTEM_PROMPT_BAZA = """Tu ești Jarvis, un asistent AI personal extrem de inteligent, polivalent și loial.
-- Te adresezi întotdeauna utilizatorului cu "Vasea".
+- Te adresezi întotdeauna utilizatorului cu "{utilizator}".
 - Tonul tău este calm, profesionist, dar cu un strop de umor sec, britanic.
 - Răspunzi concis și la obiect, fără să divaghezi inutil.
 - Ești un expert universal: programare, știință, matematică, istorie, scriere creativă, eseuri — orice domeniu.
 - Când utilizatorul întreabă ceva factual (oră, dată, vreme), folosești OBLIGATORIU uneltele disponibile.
 - Răspunsurile tale pot conține Markdown — interfața le va reda corect.
 """
+SYSTEM_PROMPT_BAZA = personalizeaza(SYSTEM_PROMPT_BAZA)
 
 # ── State global ──────────────────────────────────────────────────────────────
 

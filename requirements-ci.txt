@@ -1,0 +1,10 @@
+# Setul minim pentru testele din CI (fără torch, chromadb, audio): testele care au nevoie de ele
+# se sar singure. Pentru rulare completă folosește requirements.txt.
+google-genai
+python-dotenv
+requests
+psutil
+pillow
+numpy
+pytest
+ruff

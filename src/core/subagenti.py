@@ -35,6 +35,7 @@ from google import genai
 from google.genai import types
 
 from src.core.agent import agent_loop
+from src.core.config import personalizeaza
 
 load_dotenv()
 
@@ -90,7 +91,7 @@ AGENTI_SPECIALIZATI = {
         "nume_afisat": "Agentul Software",
         "system_prompt": (
             "Ești un sub-agent specializat în DEZVOLTARE SOFTWARE, parte din "
-            "sistemul Jarvis al lui Vasea. Scopul tău e strict tehnic: scrii, "
+            "sistemul Jarvis al lui {utilizator}. Scopul tău e strict tehnic: scrii, "
             "editezi, verifici cod și gestionezi Git/VS Code/server local. "
             "Nu ai acces la controlul sistemului de operare general, hardware "
             "sau cercetare web — dacă sarcina cere așa ceva, spune clar că "
@@ -108,7 +109,7 @@ AGENTI_SPECIALIZATI = {
         "nume_afisat": "Agentul DevOps",
         "system_prompt": (
             "Ești un sub-agent specializat în DEVOPS / CONTROLUL SISTEMULUI, "
-            "parte din sistemul Jarvis al lui Vasea. Te ocupi de comenzi de "
+            "parte din sistemul Jarvis al lui {utilizator}. Te ocupi de comenzi de "
             "sistem read-only, monitorizare hardware, control periferice și "
             "joburi în fundal. Nu scrii cod și nu faci cercetare web — dacă "
             "sarcina cere așa ceva, spune clar că depășește scopul tău. "
@@ -128,7 +129,7 @@ AGENTI_SPECIALIZATI = {
         "nume_afisat": "Agentul de Cercetare",
         "system_prompt": (
             "Ești un sub-agent specializat în CERCETARE ȘI INFORMAȚII "
-            "EXTERNE, parte din sistemul Jarvis al lui Vasea. Cauți fapte, "
+            "EXTERNE, parte din sistemul Jarvis al lui {utilizator}. Cauți fapte, "
             "definiții, vreme și informații din surse externe. Nu controlezi "
             "sistemul și nu scrii cod — dacă sarcina cere așa ceva, spune "
             "clar că depășește scopul tău. Fii transparent când o căutare "
@@ -139,6 +140,10 @@ AGENTI_SPECIALIZATI = {
         ],
     },
 }
+
+
+for _agent in AGENTI_SPECIALIZATI.values():
+    _agent["system_prompt"] = personalizeaza(_agent["system_prompt"])
 
 
 def ruleaza_subagent(cheie_agent: str, sarcina: str) -> str:

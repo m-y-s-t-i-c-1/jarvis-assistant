@@ -26,6 +26,7 @@ Integrare cu agent_loop:
 
 from google.genai import types
 from src.core.database import db
+from src.core.config import UTILIZATOR, personalizeaza
 
 # ── Configurare ───────────────────────────────────────────────────────────────
 
@@ -40,12 +41,13 @@ PROMPT_REZUMARE = """Rezumă concis următoarea conversație în 3-5 propoziții
 Păstrează: deciziile luate, informațiile importante despre utilizator,
 contextul tehnic relevant și orice preferințe menționate.
 Omite: saluturile, întrebările retorice, răspunsurile banale.
-Scrie la persoana a treia (ex: "Vasea a cerut...", "Jarvis a explicat...").
+Scrie la persoana a treia (ex: "{utilizator} a cerut...", "Jarvis a explicat...").
 
 Conversație de rezumat:
 {conversatie}
 
 Rezumat:"""
+PROMPT_REZUMARE = personalizeaza(PROMPT_REZUMARE)
 
 
 def _mesaje_la_text(mesaje: list) -> str:
@@ -59,7 +61,7 @@ def _mesaje_la_text(mesaje: list) -> str:
             if hasattr(p, "text") and p.text
         )
         if text:
-            rol = "Vasea" if msg.role == "user" else "Jarvis"
+            rol = UTILIZATOR if msg.role == "user" else "Jarvis"
             linii.append(f"{rol}: {text}")
     return "\n".join(linii)
 

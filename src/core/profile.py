@@ -18,6 +18,7 @@ Utilizare:
 from pathlib import Path
 
 from src.core.database import db
+from src.core.config import UTILIZATOR
 
 _RADACINA = Path(__file__).resolve().parents[2]
 
@@ -27,7 +28,7 @@ _RADACINA = Path(__file__).resolve().parents[2]
 
 CHEI_PROFIL = {
     # Date personale
-    "nume":                 "Vasea",
+    "nume":                 UTILIZATOR,
     "limba":                "română",
 
     # Sistem
@@ -101,7 +102,7 @@ class ProfilUtilizator:
         p = self.tot()
 
         bloc = "=== Profil utilizator ===\n"
-        bloc += f"Nume: {p.get('nume', 'Vasea')} | "
+        bloc += f"Nume: {UTILIZATOR} | "
         bloc += f"OS: {p.get('os', 'Linux')} | "
         bloc += f"Terminal: {p.get('terminal', 'N/A')} | "
         bloc += f"Editor: {p.get('editor', 'N/A')} | "

@@ -16,6 +16,8 @@ sunet din fundal poate spune „da"); de aceea cerem răspuns scurt și clar.
 import re
 import unicodedata
 
+from src.core.config import UTILIZATOR, personalizeaza
+
 MAX_INCERCARI = 3
 MAX_CUVINTE_RASPUNS = 5   # un răspuns mai lung nu e o confirmare clară
 
@@ -70,7 +72,7 @@ def cere_confirmare_vocala(nume_functie: str, argumente: dict) -> bool:
     from src.core.stt import transcrie
 
     try:
-        spune(f"Vasea, vreau să execut {_rezumat_actiune(nume_functie, argumente)}. "
+        spune(f"{UTILIZATOR}, vreau să execut {_rezumat_actiune(nume_functie, argumente)}. "
               f"Confirmi? Spune da sau nu.")
         detector = obtine_detector()
         for _ in range(MAX_INCERCARI):

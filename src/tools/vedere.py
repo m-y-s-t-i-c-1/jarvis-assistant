@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from src.core.registry import unealta
+from src.core.config import UTILIZATOR, personalizeaza
 
 load_dotenv()
 
@@ -278,7 +279,7 @@ def gaseste_pe_ecran(element: str):
 # vizuală locală (fără cost API) și vrea să decidă dacă merită să te
 # deranjeze cu o notificare.
 
-_PROMPT_ALERTA = """Analizează acest screenshot al ecranului utilizatorului (numit Vasea).
+_PROMPT_ALERTA = """Analizează acest screenshot al ecranului utilizatorului (numit {utilizator}).
 Ești Jarvis — asistentul lui AI, cu personalitate calmă, profesionistă, cu
 un strop de umor sec britanic (gen Jarvis din Iron Man).
 
@@ -302,12 +303,13 @@ Clasifică ce vezi în UNA din trei categorii:
 Ignoră ÎNTOTDEAUNA:
 - promptul de confirmare "[da/nu]" din terminalul Jarvis însuși (linia
   care începe cu "⚠️ Jarvis dorește să execute..."), sau orice text produs
-  chiar de Jarvis în conversația cu utilizatorul — Vasea e deja implicat
+  chiar de Jarvis în conversația cu utilizatorul — {utilizator} e deja implicat
   activ în acea conversație, nu are nevoie de o alertă separată
 
 Returnează DOAR un JSON valid (fără markdown):
 {"tip": "urgent"|"comentariu"|"nimic", "mesaj": "text scurt, o propoziție, doar dacă tip != nimic"}
 """
+_PROMPT_ALERTA = personalizeaza(_PROMPT_ALERTA)
 
 
 def _parseaza_json_alerta(text: str) -> dict | None:

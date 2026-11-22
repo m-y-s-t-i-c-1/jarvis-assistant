@@ -42,6 +42,7 @@ Utilizare în main.py:
 
 from google.genai import types
 from src.core.database import db
+from src.core.config import personalizeaza
 
 # ── Configurare ───────────────────────────────────────────────────────────────
 
@@ -62,14 +63,14 @@ PRAG_LUNGIME = {
 
 # Promptul pentru extragerea automată de fapte din conversație
 PROMPT_EXTRACTIE = """Analizează acest schimb de conversație și extrage informații importante
-despre utilizatorul numit Vasea sau despre contextul de lucru (proiectul lui Jarvis).
+despre utilizatorul numit {utilizator} sau despre contextul de lucru (proiectul lui Jarvis).
 
 Returnează DOAR un JSON valid cu această structură (fără markdown, fără explicații):
 {{
   "fapte": ["fapt obiectiv 1", "fapt obiectiv 2"],
   "preferinte": ["preferinta 1", "preferinta 2"],
   "context": ["context tehnic sau de proiect relevant"],
-  "corectii": ["corecție dacă Vasea a corectat ceva"],
+  "corectii": ["corecție dacă {utilizator} a corectat ceva"],
   "cod_validat": ["snippet sau descriere de cod CONFIRMAT funcțional, cu destul context ca să fie reutilizabil"],
   "decizii_arhitectura": ["o decizie de design/arhitectură luată explicit în discuție, cu motivul ei"],
   "erori_rezolvate": ["o eroare identificată ȘI rezolvată: ce era, de ce, cum s-a reparat"]
@@ -86,10 +87,11 @@ Reguli stricte:
 - Maximum 2-3 elemente per categorie.
 
 Conversație:
-Vasea: {mesaj_user}
+{utilizator}: {mesaj_user}
 Jarvis: {raspuns_jarvis}
 
 JSON:"""
+PROMPT_EXTRACTIE = personalizeaza(PROMPT_EXTRACTIE)
 
 
 class ManagerMemorie:

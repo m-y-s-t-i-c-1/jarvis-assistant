@@ -52,6 +52,7 @@ from src.core.persistenta_tura import salveaza_tura
 from src.core.context_rag import prompt_pentru_tura
 from src.core.confirmare_vocala import cere_confirmare_vocala
 from src.core.security import canal_confirmare
+from src.core.config import UTILIZATOR, personalizeaza
 from src.core.llm_provider import (
     intreaba_nvidia_cod,
     intreaba_nvidia_conversatie,
@@ -175,9 +176,10 @@ controla sistemul, ecranul sau orice altceva. Ești strict un model de
 conversație/cunoștințe generale, fără capacitate de acțiune.
 
 NU pretinde NICIODATĂ că ai executat o acțiune reală — asta ar fi o
-informație falsă transmisă lui Vasea. Dacă cererea pare să necesite o
+informație falsă transmisă lui {utilizator}. Dacă cererea pare să necesite o
 acțiune reală, spune-i clar că trebuie reformulată ca să ajungă la
 asistentul principal, cu unelte."""
+_AVERTISMENT_NVIDIA_VOCAL = personalizeaza(_AVERTISMENT_NVIDIA_VOCAL)
 
 # Routare sticky (identic cu main.py, dar stare separată pentru modul
 # vocal): un răspuns scurt de continuare moștenește categoria turei
@@ -223,7 +225,7 @@ def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata, flag_intrerupere
 SYSTEM_PROMPT = """Tu ești Jarvis, un asistent AI personal inteligent, eficient și loial.
 
 Reguli de comportament:
-- Te adresezi întotdeauna utilizatorului cu "Vasea".
+- Te adresezi întotdeauna utilizatorului cu "{utilizator}".
 - Tonul tău este calm, profesionist, dar cu un strop de umor sec, britanic.
 - Răspunzi concis și la obiect, fără să divaghezi inutil.
 - Ești proactiv: dacă observi o problemă sau o soluție mai bună, o menționezi.
@@ -238,6 +240,7 @@ Reguli de comportament:
   momentul în care începi să vorbești.
 - Nu ai cunoștințe proprii despre ora sau data curentă. Folosește uneltele disponibile.
 """
+SYSTEM_PROMPT = personalizeaza(SYSTEM_PROMPT)
 
 
 def porneste_bucla_audio(
@@ -367,7 +370,7 @@ def _porneste_bucla_audio_interna(
         if text_curat in COMENZI_OPRIRE or (
             len(cuvinte_curate) <= 3 and any(c in COMENZI_OPRIRE for c in cuvinte_curate)
         ):
-            raspuns_oprire = "La revedere, Vasea. Modul vocal dezactivat."
+            raspuns_oprire = f"La revedere, {UTILIZATOR}. Modul vocal dezactivat."
             print(f"Jarvis: {raspuns_oprire}")
             try:
                 spune(raspuns_oprire)
@@ -477,7 +480,7 @@ def _porneste_bucla_audio_interna(
 
                 if eroare_de_afisat is not None:
                     e = eroare_de_afisat
-                    raspuns_text = f"Îmi pare rău, Vasea, am întâmpinat o eroare: {str(e)[:100]}"
+                    raspuns_text = f"Îmi pare rău, {UTILIZATOR}, am întâmpinat o eroare: {str(e)[:100]}"
                     print(f"[EROARE agent]: {e}")
                     # FIX: print_exc() în afara blocului except afișa doar
                     # "NoneType: None" — excepția era deja ieșită din scope.

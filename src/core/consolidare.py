@@ -22,6 +22,7 @@ import json
 from datetime import datetime, timedelta
 from google.genai import types
 from src.core.database import db
+from src.core.config import UTILIZATOR, personalizeaza
 from src.core.rag import rag
 
 # ── Configurare ───────────────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ TIPURI_VALIDE = (
     "cod_validat", "decizie_arhitectura", "eroare_rezolvata",
 )
 
-PROMPT_CONSOLIDARE = """Analizează aceste amintiri despre utilizatorul Vasea și consolidează-le.
+PROMPT_CONSOLIDARE = """Analizează aceste amintiri despre utilizatorul {utilizator} și consolidează-le.
 
 Amintiri de consolidat:
 {amintiri}
@@ -73,6 +74,7 @@ Reguli:
   eroare_rezolvata sunt valoroase: nu le șterge și nu le muta în alt tip).
 - Maximum 15 amintiri consolidate total.
 """
+PROMPT_CONSOLIDARE = personalizeaza(PROMPT_CONSOLIDARE)
 
 
 class ConsolidareMemorie:

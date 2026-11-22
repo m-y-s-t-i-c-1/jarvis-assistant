@@ -1,0 +1,12 @@
+# Copiază acest fișier ca config/jarvis.toml (necomis în git) și modifică valorile.
+# Variabilele de mediu din .env au prioritate față de acest fișier.
+
+[persona]
+# Cum te numește Jarvis în prompturi și în mesajele rostite. Env: JARVIS_USER
+utilizator = "Vasea"
+
+[locatie]
+# Orașul pentru vreme când nu spui altul. Env: JARVIS_ORAS
+oras = "Chișinău"
+# Fusul orar pentru Google Calendar (nume IANA). Env: JARVIS_TIMEZONE
+fus_orar = "Europe/Chisinau"
