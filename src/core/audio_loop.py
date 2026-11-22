@@ -53,6 +53,7 @@ from src.core.context_rag import prompt_pentru_tura
 from src.core.confirmare_vocala import cere_confirmare_vocala
 from src.core.security import canal_confirmare
 from src.core.config import UTILIZATOR, personalizeaza
+from src.core import reflex
 from src.core.llm_provider import (
     intreaba_nvidia_cod,
     intreaba_nvidia_conversatie,
@@ -417,18 +418,26 @@ def _porneste_bucla_audio_interna(
             # RESOURCE_EXHAUSTED) pentru conversații banale care nu au nevoie
             # de nicio unealtă reală.
             global _ultima_categorie_vocal
-            if este_raspuns_scurt_de_continuare(text_utilizator):
+            # Reflex: cereri banale rezolvate fără LLM, înaintea routerului (latență minimă, zero tokeni).
+            raspuns_reflex = reflex.incearca(text_utilizator)
+            if raspuns_reflex is not None:
+                categorie = "reflex"
+            elif este_raspuns_scurt_de_continuare(text_utilizator):
                 categorie = _ultima_categorie_vocal
                 print(f"[Router vocal] Răspuns scurt de continuare — păstrez categoria: '{categorie}'")
             else:
                 categorie = clasifica(text_utilizator)
                 print(f"[Router vocal] Cerere clasificată drept: '{categorie}'")
-            _ultima_categorie_vocal = categorie
+            if categorie != "reflex":  # o tură reflex nu schimbă categoria „lipicioasă" a conversației
+                _ultima_categorie_vocal = categorie
 
             eroare_de_afisat = None
             raspuns_final = ""
             # Profil + amintiri proaspete + context RAG, calculat pentru tura curentă.
-            prompt_tura = prompt_pentru_tura(SYSTEM_PROMPT, system_prompt, text_utilizator, sesiune_id)
+            prompt_tura = (
+                "" if categorie == "reflex"
+                else prompt_pentru_tura(SYSTEM_PROMPT, system_prompt, text_utilizator, sesiune_id)
+            )
 
             # IMPORTANT: conversatie_activa rămâne setat pe durata ÎNTREGII
             # ture (toate propozițiile răspunsului, nu doar una), ca alertele
@@ -436,7 +445,14 @@ def _porneste_bucla_audio_interna(
             # două propoziții ale aceluiași răspuns — vezi stare_conversatie.py.
             conversatie_activa.set()
             try:
-                if categorie == "unelte":
+                if categorie == "reflex":
+                    raspuns_final = raspuns_reflex
+                    istoric.append(types.Content(role="model", parts=[types.Part(text=raspuns_reflex)]))
+                    rostit = _vorbeste_text_pe_propozitii(raspuns_reflex, _la_propozitie, flag_intrerupere)
+                    if flag_intrerupere.is_set():
+                        raspuns_final = rostit or "[întrerupt]"
+                        istoric[-1] = types.Content(role="model", parts=[types.Part(text=raspuns_final)])
+                elif categorie == "unelte":
                     # Singura cale cu tool-calling real — Gemini, streaming nativ.
                     try:
                         raspuns_final = _agent_streaming_cu_fallback_chei(
@@ -508,7 +524,9 @@ def _porneste_bucla_audio_interna(
         if sesiune_id and raspuns_final and a_raspuns_real and eroare_de_afisat is None and raspuns_final != "[întrerupt]":
             threading.Thread(
                 target=salveaza_tura,
-                args=(sesiune_id, text_utilizator, raspuns_final, next(rotatie_clienti), model),
+                # fără client => doar DB + RAG: nu consumăm cotă pentru extragere de amintiri din cereri banale
+                args=(sesiune_id, text_utilizator, raspuns_final,
+                      None if categorie == "reflex" else next(rotatie_clienti), model),
                 daemon=True,
             ).start()
 

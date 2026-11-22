@@ -15,6 +15,7 @@ from src.core.jobs import porneste_thread_watcher
 from src.core.context_manager import proceseaza as proceseaza_context
 from src.core.database import db
 from src.core.config import UTILIZATOR, personalizeaza
+from src.core import reflex
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.consolidare import consolidare
@@ -421,6 +422,19 @@ def bucla_text(istoric: list, sesiune_id: str, system_prompt: str):
                 break
 
             if not mesaj_utilizator.strip():
+                continue
+
+            # Reflex: cereri banale (ora, volum, status sistem) rezolvate fără LLM — zero tokeni, instant.
+            raspuns_reflex = reflex.incearca(mesaj_utilizator)
+            if raspuns_reflex is not None:
+                with lock_istoric:
+                    reflex.adauga_in_istoric(istoric, mesaj_utilizator, raspuns_reflex)
+                print("Jarvis:", raspuns_reflex)
+                try:
+                    db.salveaza_mesaj(sesiune_id, "user", mesaj_utilizator)
+                    db.salveaza_mesaj(sesiune_id, "assistant", raspuns_reflex)
+                except Exception as e:
+                    print(f"[Memorie] Salvare reflex eșuată: {e}")
                 continue
 
             # FIX: tura întreagă sub lock — wake-word rulează pe alt thread cu același `istoric`.

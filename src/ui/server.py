@@ -30,6 +30,7 @@ from src import tools  # noqa: F401
 from src.core.agent import agent_loop
 from src.core.database import db
 from src.core.config import UTILIZATOR, personalizeaza
+from src.core import reflex
 from src.core.memory import memorie
 from src.core.rag import rag
 from src.core.context_manager import proceseaza as proceseaza_context
@@ -192,6 +193,15 @@ def _anuleaza_tura(mesaj_curent) -> None:
             return
 
 
+def _ruleaza_reflex(mesaj_user: str):
+    """Cereri banale (ora, volum, status) fără LLM. Întoarce răspunsul sau None."""
+    raspuns = reflex.incearca(mesaj_user)
+    if raspuns is not None:
+        with _LOCK_AGENT:
+            reflex.adauga_in_istoric(istoric, mesaj_user, raspuns)
+    return raspuns
+
+
 def _ruleaza_agent_blocat(mesaj_user: str) -> str:
     mesaj_curent = types.Content(role="user", parts=[types.Part(text=mesaj_user)])
     istoric.append(mesaj_curent)
@@ -303,13 +313,16 @@ async def _proceseaza_mesaj(text_user: str):
     await broadcast({"tip": "status", "stare": "thinking"})
 
     loop = asyncio.get_running_loop()  # FIX: get_event_loop() e deprecat în coroutine
-    try:
-        raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
-    except Exception as e:
-        raspuns = f"Eroare: {str(e)[:200]}"
-        await broadcast({"tip": "eroare", "text": raspuns})
-        await broadcast({"tip": "status", "stare": "idle"})
-        return
+    raspuns = await loop.run_in_executor(None, _ruleaza_reflex, text_user)
+    din_reflex = raspuns is not None
+    if not din_reflex:
+        try:
+            raspuns = await loop.run_in_executor(None, ruleaza_agent, text_user)
+        except Exception as e:
+            raspuns = f"Eroare: {str(e)[:200]}"
+            await broadcast({"tip": "eroare", "text": raspuns})
+            await broadcast({"tip": "status", "stare": "idle"})
+            return
 
     # FIX: salvarea + indexarea RAG (embeddings) rulau SINCRON în event loop (UI-ul îngheța,
     # ping/pong întârziau) și o eroare aici omora conexiunea înainte să trimită răspunsul.
@@ -325,7 +338,7 @@ async def _proceseaza_mesaj(text_user: str):
         print(f"[Memorie] Salvare/indexare eșuată: {e}")
 
     # FIX: UI-ul nu extrăgea amintiri episodice și nu consolida memoria (main.py o face).
-    if _gemini_clienti:
+    if _gemini_clienti and not din_reflex:
         loop.run_in_executor(None, _memorie_in_fundal, text_user, raspuns)
 
     await broadcast({
