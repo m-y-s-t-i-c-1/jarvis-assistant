@@ -25,6 +25,7 @@ citită, monitorul aferent se oprește silențios cu un mesaj explicativ —
 NU blochează pornirea restului lui Jarvis.
 """
 
+import atexit
 import re
 import subprocess
 import threading
@@ -44,6 +45,28 @@ RACIRE_MINIMA = 30
 _ultima_alerta = {"jurnal sistem": 0.0, "kernel": 0.0}
 _opreste_monitorizarea = threading.Event()
 
+# FIX: procesele `journalctl -f` / `dmesg -W` nu erau oprite niciodată: bucla citește stdout și verifică
+# semnalul de oprire doar când sosește o linie nouă, deci pe un sistem liniștit procesele rămâneau orfane
+# după ieșirea din Jarvis (și la fiecare repornire se adunau încă două).
+_procese: list = []
+_thread_uri: list = []
+_lock_procese = threading.Lock()
+
+
+def _termina_procesele() -> None:
+    with _lock_procese:
+        de_oprit = list(_procese)
+        _procese.clear()
+    for proces in de_oprit:
+        try:
+            if proces.poll() is None:
+                proces.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_termina_procesele)
+
 
 def _urmareste_sursa(comanda: list[str], nume_sursa: str, callback):
     """Pornește un subproces în follow mode și verifică fiecare linie nouă."""
@@ -62,6 +85,8 @@ def _urmareste_sursa(comanda: list[str], nume_sursa: str, callback):
         print(f"[Monitor Log] Eroare la pornirea monitorizării '{nume_sursa}': {e}")
         return
 
+    with _lock_procese:
+        _procese.append(proces)
     print(f"[Monitor Log] Urmărire activă: {nume_sursa}")
 
     for linie in proces.stdout:
@@ -100,28 +125,26 @@ def porneste_monitorizare_log(callback):
                   când o linie nouă se potrivește PATTERN_EROARE, cu
                   răcire de RACIRE_MINIMA secunde per sursă.
     """
+    # FIX: un al doilea apel dubla urmăririle (și alertele) cât timp primele rulau încă.
+    _thread_uri[:] = [t for t in _thread_uri if t.is_alive()]
+    if _thread_uri:
+        return
     _opreste_monitorizarea.clear()
 
-    threading.Thread(
-        target=_urmareste_sursa,
-        args=(
-            ["journalctl", "--user", "-f", "-n", "0", "-p", "err..emerg", "--no-pager"],
-            "jurnal sistem",
-            callback,
-        ),
-        daemon=True,
-    ).start()
-
-    threading.Thread(
-        target=_urmareste_sursa,
-        args=(["dmesg", "-W"], "kernel", callback),
-        daemon=True,
-    ).start()
+    surse = (
+        (["journalctl", "--user", "-f", "-n", "0", "-p", "err..emerg", "--no-pager"], "jurnal sistem"),
+        (["dmesg", "-W"], "kernel"),
+    )
+    for comanda, nume in surse:
+        t = threading.Thread(target=_urmareste_sursa, args=(comanda, nume, callback), daemon=True)
+        _thread_uri.append(t)
+        t.start()
 
 
 def opreste_monitorizarea_log():
     """Oprește ambele thread-uri de monitorizare log, dacă rulează."""
     _opreste_monitorizarea.set()
+    _termina_procesele()  # altfel thread-urile rămân blocate pe stdout până la următoarea linie de log
     print("[Monitor Log] Oprit.")
 
 

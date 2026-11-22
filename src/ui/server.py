@@ -396,9 +396,12 @@ async def websocket_endpoint(ws: WebSocket):
                 continue
 
             if tip == "mesaj":
-                text_user = payload.get("text", "").strip()
-                if not text_user:
+                text_user = payload.get("text", "")
+                # FIX: un `text` non-șir (număr, listă, null) făcea .strip() să arunce, iar excepția
+                # generală de mai jos închidea conexiunea clientului.
+                if not isinstance(text_user, str) or not text_user.strip():
                     continue
+                text_user = text_user.strip()
                 # FIX: tura rula în acest handler (await), deci bucla de recepție era blocată și
                 # răspunsul de confirmare al utilizatorului nu putea fi citit. O rulăm ca task.
                 task = asyncio.create_task(_proceseaza_mesaj(text_user))
