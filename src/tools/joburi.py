@@ -51,6 +51,8 @@ def porneste_job_fundal(comanda: str, descriere: str, director: str = "."):
     if not parti_comanda:
         return "Comanda e goală, nu am ce rula."
 
+    # FIX: director gol (parametru opțional trimis ca "") -> subprocess cu cwd="" eșua imediat.
+    director = (director or "").strip() or "."
     job_id = manager_joburi.porneste_job(parti_comanda, descriere, cwd=director)
     return (
         f"Job pornit în fundal: '{descriere}' (ID: {job_id}). "

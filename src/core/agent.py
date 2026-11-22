@@ -44,6 +44,15 @@ def _raspunsul_pare_suspect(text: str) -> bool:
     return False
 
 
+def _apel_permis(nume_functie: str, unelte_permise) -> bool:
+    """
+    FIX: `unelte_permise` restricționa doar ce DECLARAM modelului, nu și ce EXECUTAM. Un model care
+    halucina un apel la o unealtă din afara listei (ex. un sub-agent de Cercetare care cere
+    `git_push`) o vedea rulată, deoarece ruleaza_functie() caută în tot registrul. Acum refuzăm.
+    """
+    return unelte_permise is None or nume_functie in unelte_permise
+
+
 def _extrage_continut(raspuns):
     """
     Extrage în siguranță conținutul dintr-un răspuns Gemini.
@@ -241,7 +250,10 @@ def agent_loop(
 
             # Security check — blacklist + confirmare dacă e marcată
             necesita_confirmare = CONFIRMARE_FUNCTII.get(apel.name, False)
-            aprobat, motiv = trece_prin_securitate(apel.name, argumente, necesita_confirmare)
+            if not _apel_permis(apel.name, unelte_permise):
+                aprobat, motiv = False, f"Funcția '{apel.name}' nu este disponibilă în acest context."
+            else:
+                aprobat, motiv = trece_prin_securitate(apel.name, argumente, necesita_confirmare)
 
             if not aprobat:
                 print(f"[SECURITATE: execuție blocată — {motiv}]")
@@ -409,6 +421,15 @@ def agent_loop_streaming(
         apeluri_functii = []
         parti_acumulate = []
         intrerupt = False
+        # FIX: la barge-in, în istoric ajungea TOT textul generat, nu doar ce apucase utilizatorul
+        # să audă -> modelul „credea" că a spus lucruri pe care nu le-a rostit niciodată.
+        # Ținem propozițiile trimise efectiv la TTS (inclusiv cea întreruptă, auzită parțial).
+        propozitii_rostite: list[str] = []
+
+        def _rosteste(propozitie: str, _lista=propozitii_rostite) -> None:
+            _lista.append(propozitie)
+            if la_propozitie_gata:
+                la_propozitie_gata(propozitie)
 
         _start_gemini = time.perf_counter()
         _primul_chunk_masurat = False
@@ -451,7 +472,7 @@ def agent_loop_streaming(
                         propozitie = buffer_text[:capat].strip()
                         buffer_text = buffer_text[capat:]
                         if propozitie and la_propozitie_gata:
-                            la_propozitie_gata(propozitie)
+                            _rosteste(propozitie)
 
                 if intrerupt:
                     break
@@ -469,11 +490,18 @@ def agent_loop_streaming(
             # FIX: scoatem function_call-urile fără răspuns — un call
             # rămas în istoric fără function_response strică toate turele
             # următoare (400).
-            continut_curat = _fara_function_calls(continut_final)
+            if la_propozitie_gata is not None:
+                # Păstrăm în istoric doar ce a fost rostit (sau un marcaj, ca să rămână alternanța user/model).
+                text_rostit = " ".join(propozitii_rostite).strip()
+                text_returnat = text_rostit or "[întrerupt]"
+                continut_curat = types.Content(role="model", parts=[types.Part(text=text_returnat)])
+            else:
+                continut_curat = _fara_function_calls(continut_final)
+                text_returnat = text_complet or "[întrerupt]"
             if continut_curat is not None:
                 istoric.append(continut_curat)
             print("[Agent] Generare întreruptă de barge-in.")
-            return text_complet or "[întrerupt]"
+            return text_returnat
 
         # Ce a rămas în buffer (ultima propoziție, fără spațiu final tăiat)
         if buffer_text.strip() and la_propozitie_gata:
@@ -489,7 +517,10 @@ def agent_loop_streaming(
                 argumente = dict(apel.args) if apel.args else {}
 
                 necesita_confirmare = CONFIRMARE_FUNCTII.get(apel.name, False)
-                aprobat, motiv = trece_prin_securitate(apel.name, argumente, necesita_confirmare)
+                if not _apel_permis(apel.name, unelte_permise):
+                    aprobat, motiv = False, f"Funcția '{apel.name}' nu este disponibilă în acest context."
+                else:
+                    aprobat, motiv = trece_prin_securitate(apel.name, argumente, necesita_confirmare)
 
                 if not aprobat:
                     print(f"[SECURITATE: execuție blocată — {motiv}]")

@@ -93,6 +93,7 @@ def status_disc(cale: str = "/"):
     if not _PSUTIL_DISPONIBIL:
         return "Librăria psutil nu e instalată. Rulează: pip install psutil"
 
+    cale = (cale or "").strip() or "/"  # FIX: parametrul opțional vine uneori ca șir gol -> „Calea '' nu există"
     try:
         disc = psutil.disk_usage(cale)
     except FileNotFoundError:
@@ -240,7 +241,15 @@ def status_volum():
 )
 def comuta_mute(activeaza_mute: str):
     """Pornește sau oprește mute pe sink-ul audio implicit."""
-    valoare = "1" if activeaza_mute.lower() in ("da", "yes", "true") else "0"
+    # FIX: orice valoare în afara lui da/yes/true ( „1", „mute", „Da.") DEZACTIVA mute-ul, deși
+    # cererea era de a opri sunetul. Acum valorile necunoscute sunt respinse explicit.
+    brut = str(activeaza_mute).strip().lower().rstrip(".!")
+    if brut in ("da", "yes", "true", "1", "on", "mute"):
+        valoare = "1"
+    elif brut in ("nu", "no", "false", "0", "off", "unmute"):
+        valoare = "0"
+    else:
+        return f"Valoare necunoscută pentru activeaza_mute: '{activeaza_mute}'. Folosește 'da' sau 'nu'."
 
     try:
         subprocess.run(

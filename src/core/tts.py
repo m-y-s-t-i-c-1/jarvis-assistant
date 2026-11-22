@@ -427,9 +427,10 @@ def spune(text: str) -> None:
     if not text or not text.strip():
         return
 
-    _stop_event.clear()
-
     with _redare_lock:
+        # FIX: flagul se golea ÎNAINTE de lock; o alertă care aștepta lock-ul ștergea un barge-in
+        # abia semnalat peste propoziția care încă se reda, iar întreruperea se pierdea.
+        _stop_event.clear()
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             cale_tmp = tmp.name
 

@@ -185,7 +185,7 @@ asistentul principal, cu unelte."""
 _ultima_categorie_vocal: str = "unelte"
 
 
-def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata, flag_intrerupere=None) -> None:
+def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata, flag_intrerupere=None) -> str:
     """
     Împarte un text complet (primit dintr-o singură bucată, de la NVIDIA —
     care nu suportă streaming propoziție-cu-propoziție ca Gemini) în
@@ -195,23 +195,29 @@ def _vorbeste_text_pe_propozitii(text: str, la_propozitie_gata, flag_intrerupere
     propoziție) — diferența e că textul a fost deja generat integral
     înainte să înceapă vorbirea, nu pe măsură ce vine.
     """
+    # Returnează textul trimis efectiv la TTS (inclusiv propoziția întreruptă), ca apelantul să poată
+    # păstra în istoric doar ce a auzit utilizatorul.
+    rostite: list[str] = []
     pozitie = 0
     for potrivire in _PATTERN_SFARSIT_PROPOZITIE.finditer(text):
         # FIX: barge-in oprea doar propoziția curentă; restul răspunsului
         # NVIDIA continua să fie rostit.
         if flag_intrerupere is not None and flag_intrerupere.is_set():
-            return
+            return " ".join(rostite)
         capat = potrivire.end()
         propozitie = text[pozitie:capat].strip()
         if propozitie:
+            rostite.append(propozitie)
             la_propozitie_gata(propozitie)
         pozitie = capat
 
     if flag_intrerupere is not None and flag_intrerupere.is_set():
-        return
+        return " ".join(rostite)
     rest = text[pozitie:].strip()
     if rest:
+        rostite.append(rest)
         la_propozitie_gata(rest)
+    return " ".join(rostite)
 
 
 SYSTEM_PROMPT = """Tu ești Jarvis, un asistent AI personal inteligent, eficient și loial.
@@ -452,7 +458,11 @@ def _porneste_bucla_audio_interna(
                         istoric.append(
                             types.Content(role="model", parts=[types.Part(text=rezultat)])
                         )
-                        _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
+                        rostit = _vorbeste_text_pe_propozitii(rezultat, _la_propozitie, flag_intrerupere)
+                        if flag_intrerupere.is_set():
+                            # FIX: la barge-in istoricul și DB-ul păstrau tot răspunsul NVIDIA, nu doar ce s-a auzit.
+                            raspuns_final = rostit or "[întrerupt]"
+                            istoric[-1] = types.Content(role="model", parts=[types.Part(text=raspuns_final)])
                     else:
                         # NVIDIA indisponibil — cădem pe Gemini, ca plasă de siguranță.
                         print(f"[NVIDIA indisponibil pentru '{categorie}' — trec pe Gemini]")

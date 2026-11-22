@@ -113,6 +113,15 @@ BLACKLIST_PATTERNS = [
     r"\bpython[\d.]*\s+(?:-[\w.]+\s+)*-\w*c\b",       # python -c, cu sau fără ghilimele
     r"\bfind\b.*\s-delete\b",
     r"\bfind\b.*-exec\s+rm\b",   # FIX: ocolea regula de mai sus
+    # FIX: ocoliri ale regulilor de mai sus (--force, curl | bash, git reset --hard):
+    r"\bgit\s+push\b[^\n]*\s-[a-z]*f[a-z]*(?:\s|$)",   # git push -f / -fu
+    r"\bgit\s+push\b[^\n]*\s\+\S",                     # git push origin +main
+    r"\b(?:curl|wget)\b.+\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/\S*/)?(?:ba|z|da|k)?sh\b",  # | sudo bash, | /bin/sh
+    r"\b(?:curl|wget)\b.+\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:/\S*/)?python[\d.]*\b",     # | python
+    r"\bsudo\s+(?:-\S+\s+)*(?:/\S*/)?(?:ba|z|da|k)?sh\b",   # sudo bash / sudo -E sh
+    r"\bsudo\s+(?:su|-[si])\b",                        # sudo su / sudo -s / sudo -i
+    r"\bgit\s+branch\s+-[a-z]*(?-i:D)\b",              # git branch -D (nu și -d, cel sigur)
+    r"\bgit\s+(?:checkout|restore)\s+(?:--\s+)?\.(?:\s|$)",   # git checkout . / git restore .
 ]
 
 # Pre-compilăm regex-urile o dată la import, nu la fiecare apel

@@ -17,11 +17,14 @@ import re
 import unicodedata
 
 MAX_INCERCARI = 3
-MAX_CUVINTE_RASPUNS = 8   # un răspuns mai lung nu e o confirmare clară
+MAX_CUVINTE_RASPUNS = 5   # un răspuns mai lung nu e o confirmare clară
 
 _DA = {"da", "daa", "sigur", "confirm", "confirmat", "executa", "ok", "okay", "bine",
        "desigur", "aprob", "aprobat", "continua"}
 _NU = {"nu", "nuu", "stop", "anuleaza", "anulez", "anulat", "renunt", "opreste", "niciodata"}
+# Cuvinte de politețe/umplutură permise ÎN JURUL unei afirmații („da, te rog", „sigur, acum").
+_UMPLUTURA = {"te", "rog", "va", "acum", "atunci", "hai", "o", "fa"}
+_DA_FRAZE = {"fa o", "fao", "fa o te rog"}
 
 
 def _normalizeaza(text: str) -> list[str]:
@@ -38,7 +41,13 @@ def interpreteaza_raspuns(text: str):
         return None
     if any(c in _NU for c in cuvinte):
         return False
-    if any(c in _DA for c in cuvinte) or "fa o" in " ".join(cuvinte):
+    text_curat = " ".join(cuvinte)
+    if text_curat in _DA_FRAZE:
+        return True
+    # FIX: înainte, ORICE cuvânt din _DA într-un enunț de până la 8 cuvinte însemna „da" —
+    # „ce execută?" sau „continuă cu ce?" aprobau o acțiune. Acum toate cuvintele trebuie să fie
+    # afirmații sau umplutură, cu cel puțin o afirmație.
+    if all(c in _DA or c in _UMPLUTURA for c in cuvinte) and any(c in _DA for c in cuvinte):
         return True
     return None
 
@@ -46,7 +55,11 @@ def interpreteaza_raspuns(text: str):
 def _rezumat_actiune(nume_functie: str, argumente: dict) -> str:
     nume = nume_functie.replace("_", " ")
     valori = [str(v).strip() for v in (argumente or {}).values() if str(v).strip()]
-    detalii = "; ".join(v[:60] for v in valori[:2])
+    # FIX: se rosteau doar primele 2 valori, tăiate la 60 de caractere, fără nicio mențiune că
+    # restul lipsește -> utilizatorul putea aproba o comandă pe care nu o auzise întreagă.
+    detalii = "; ".join(v[:120] for v in valori[:3])
+    if len(valori) > 3 or any(len(v) > 120 for v in valori[:3]):
+        detalii += " și alte detalii"
     return f"{nume}: {detalii}" if detalii else nume
 
 
@@ -63,6 +76,8 @@ def cere_confirmare_vocala(nume_functie: str, argumente: dict) -> bool:
         for _ in range(MAX_INCERCARI):
             audio = detector.asculta_pana_la_pauza()
             if audio is None:
+                # FIX: tăcerea consuma o încercare fără niciun semn; utilizatorul nu știa că e ascultat.
+                spune("Nu te-am auzit. Spune da sau nu.")
                 continue
             text = transcrie(audio)
             print(f"[Confirmare vocală] Am auzit: '{text}'")

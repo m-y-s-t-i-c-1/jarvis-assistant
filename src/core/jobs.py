@@ -78,7 +78,8 @@ class JobManager:
                 comanda,
                 capture_output=True,
                 text=True,
-                cwd=cwd,
+                errors="replace",  # FIX: un byte non-UTF8 în output ridica UnicodeDecodeError și jobul reușit apărea ca „eroare"
+                cwd=cwd or ".",
                 timeout=600,  # 10 minute — plasă de siguranță pentru joburi blocate
             )
 

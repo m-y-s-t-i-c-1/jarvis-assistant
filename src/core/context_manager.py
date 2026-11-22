@@ -170,6 +170,11 @@ def proceseaza(
 
         print(f"[Context] Rezumat generat: {text_rezumat[:100]}...")
 
+    # FIX: fără rezumat (ex. blocul vechi conținea doar function_call/response), istoricul nou putea
+    # începe cu un răspuns „model" -> Gemini respinge cu 400. Eliminăm din față tot ce nu e „user".
+    while len(istoric_nou) > 1 and getattr(istoric_nou[0], "role", None) != "user":
+        istoric_nou.pop(0)
+
     # Modificăm lista originală in-place (important — e același obiect din main.py)
     istoric.clear()
     istoric.extend(istoric_nou)

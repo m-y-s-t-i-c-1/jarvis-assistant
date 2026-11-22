@@ -338,7 +338,7 @@ def git_branches(cale_repo: str = "."):
 )
 def git_checkout(branch: str, creeaza_nou: str = "nu", cale_repo: str = "."):
     args = ["checkout"]
-    if creeaza_nou.lower() in ("da", "yes", "true"):
+    if str(creeaza_nou).strip().lower() in ("da", "yes", "true"):
         args.append("-b")
     args.append(_arg_sigur(branch, "branch"))
     return _ruleaza_git(args, cale_repo)
@@ -416,7 +416,8 @@ def git_commit(mesaj: str, cale_repo: str = "."):
     necesita_confirmare=True,
 )
 def git_push(remote: str = "origin", branch: str = "", cale_repo: str = "."):
-    args = ["push", _arg_sigur(remote, "remote")]
+    # FIX: parametrul opțional vine uneori ca șir gol -> `git push ""` eșua.
+    args = ["push", _arg_sigur((remote or "").strip() or "origin", "remote")]
     if branch:
         args.append(_arg_sigur(branch, "branch"))
     return _ruleaza_git(args, cale_repo)

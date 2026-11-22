@@ -55,6 +55,8 @@ CUVINTE_UNELTE = (
     "ora exactă", "ora exacta", "ora curentă", "ora curenta",
     "ce zi", "în ce zi", "in ce zi", "ziua de azi", "ziua curentă", "ziua curenta",
     "ce lună", "ce luna", "în ce lună", "in ce luna", "în ce luna",
+    # FIX: „ce an e" / „în ce an suntem" cădeau pe NVIDIA (fără unelte), care inventează anul.
+    "ce an", "în ce an", "in ce an", "anul curent",
     "data de azi", "data de astăzi", "data de astazi", "data curentă", "data curenta",
     "care e data", "care este data",
     # joburi fundal
@@ -76,6 +78,8 @@ CUVINTE_UNELTE = (
     "vreme", "cauta pe google", "cauta pe web", "cauta pe net", "cauta pe internet",
     "mai tare", "mai incet", "mai luminos", "mai intunecat",
     "memoria", "memorie", "cat de plin*", "stocare",
+    # FIX: cauta_web e descrisă ca „caută X", dar doar „caută pe internet/web/google" ajungea la Gemini.
+    "cauta", "cautare*",
 )
 
 # Cuvinte care indică o întrebare tehnică / de cod (fără unealtă)

@@ -207,7 +207,7 @@ class JarvisDB:
         """Returnează toate mesajele dintr-o sesiune, în ordine cronologică."""
         with self._conexiune() as con:
             rows = con.execute(
-                "SELECT * FROM conversatii WHERE sesiune_id=? ORDER BY creat_la",
+                "SELECT * FROM conversatii WHERE sesiune_id=? ORDER BY id",
                 (sesiune_id,)
             ).fetchall()
         return [dict(r) for r in rows]
@@ -222,7 +222,7 @@ class JarvisDB:
                 """SELECT c.*, s.creat_la as sesiune_data
                    FROM conversatii c
                    JOIN sesiuni s ON c.sesiune_id = s.id
-                   ORDER BY c.creat_la DESC
+                   ORDER BY c.id DESC
                    LIMIT ?""",
                 (limita_mesaje,)
             ).fetchall()
