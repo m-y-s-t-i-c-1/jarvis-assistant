@@ -8,3 +8,6 @@ pillow
 numpy
 pytest
 ruff
+fastapi
+httpx
+uvicorn
