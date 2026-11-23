@@ -106,12 +106,13 @@ app = FastAPI(title="Jarvis UI")
 # FIX (DNS rebinding): WebSocket-ul verifica Origin, dar rutele HTTP (/api/history, /api/stats) nu verificau
 # nimic. Un site răuvoitor al cărui nume DNS e mutat pe 127.0.0.1 putea citi istoricul conversațiilor din
 # browserul tău, pentru că browserul îl consideră „același origin". Acceptăm doar Host-urile așteptate.
-_HOSTURI_PERMISE = {urlparse(o).netloc.lower() for o in _ORIGINI_PERMISE} | {f"[::1]:{PORT}"}
+def _hosturi_permise() -> set[str]:
+    return {urlparse(o).netloc.lower() for o in _ORIGINI_PERMISE} | {f"[::1]:{PORT}"}
 
 
 @app.middleware("http")
 async def _verifica_host(request: Request, call_next):
-    if request.headers.get("host", "").lower() not in _HOSTURI_PERMISE:
+    if request.headers.get("host", "").lower() not in _hosturi_permise():
         return PlainTextResponse("Host nepermis.", status_code=403)
     return await call_next(request)
 

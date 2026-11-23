@@ -22,7 +22,6 @@ def server(monkeypatch):
             monkeypatch.setitem(sys.modules, nume, MagicMock())
     monkeypatch.setenv("GEMINI_API_KEY", "x")
     monkeypatch.setenv("JARVIS_PORT", "8080")
-    monkeypatch.setenv("JARVIS_ALLOWED_ORIGINS", "http://192.168.1.5:8080")
     from src.core.database import db
     monkeypatch.setattr(db, "incepe_sesiune", lambda: "sesiune-test")   # nu poluăm baza de date reală
     try:
@@ -31,13 +30,18 @@ def server(monkeypatch):
         for nume in (set(sys.modules) - inainte) & _PE_STUB:
             sys.modules.pop(nume, None)
         pytest.skip(f"server nu se poate importa aici: {e}")
+    # Serverul poate fi deja importat de alt test (cu env-ul de atunci): nu ne bazăm pe variabilele de mediu
+    # citite la import, ci fixăm explicit portul și originile.
+    monkeypatch.setattr(modul, "PORT", 8080)
+    monkeypatch.setattr(modul, "_ORIGINI_PERMISE", {
+        "http://localhost:8080", "http://127.0.0.1:8080", "http://192.168.1.5:8080"})
     yield modul
     for nume in (set(sys.modules) - inainte) & _PE_STUB:
         sys.modules.pop(nume, None)
 
 
 @pytest.mark.parametrize("host", ["localhost:8080", "127.0.0.1:8080", "[::1]:8080", "LOCALHOST:8080",
-                                  "192.168.1.5:8080"])   # ultimul vine din JARVIS_ALLOWED_ORIGINS
+                                  "192.168.1.5:8080"])   # ultimul: origine suplimentară permisă
 def test_host_permis(server, host):
     from fastapi.testclient import TestClient
     assert TestClient(server.app).get("/api/history", headers={"host": host}).status_code == 200
