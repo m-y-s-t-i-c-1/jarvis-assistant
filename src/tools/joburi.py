@@ -10,9 +10,22 @@ from src.core.registry import unealta
 from src.core.jobs import manager_joburi
 
 
+def _operatori_shell(comanda: str) -> list[str]:
+    """Operatorii de shell (&&, ||, ;, |, &, <, >) din comandă. Jobul rulează fără shell, deci ar deveni
+    argumente literale: `npm install && npm run build` ar încerca să instaleze pachete numite „&&", „npm"..."""
+    lex = shlex.shlex(comanda, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokeni = list(lex)
+    except ValueError:
+        return []   # ghilimele neînchise: le raportează shlex.split de mai jos
+    return sorted({t for t in tokeni if t and set(t) <= set("&|;<>()")})
+
+
 @unealta(
     description=(
-        "Pornește o comandă lungă în fundal, fără să blocheze conversația. "
+        "Pornește O SINGURĂ comandă lungă în fundal (fără shell: nu merg &&, |, ;, > — pornește comenzile "
+        "separat), fără să blocheze conversația. "
         "Folosește pentru comenzi care pot dura mult (build, compilare, "
         "download, sincronizare etc.) — orice de unde NU ai nevoie de "
         "rezultat imediat. Jarvis va anunța automat când jobul se termină. "
@@ -50,6 +63,13 @@ def porneste_job_fundal(comanda: str, descriere: str, director: str = "."):
 
     if not parti_comanda:
         return "Comanda e goală, nu am ce rula."
+
+    operatori = _operatori_shell(comanda)
+    if operatori:
+        return (
+            f"Comanda conține operatori de shell ({', '.join(operatori)}), care nu sunt suportați: jobul "
+            f"rulează o singură comandă, fără shell. Pornește fiecare comandă ca job separat."
+        )
 
     # FIX: director gol (parametru opțional trimis ca "") -> subprocess cu cwd="" eșua imediat.
     director = (director or "").strip() or "."

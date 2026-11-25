@@ -12,17 +12,36 @@ valorile ca să corespundă cu ce ai instalat tu pe Arch (ex: terminalul
 tău exact - alacritty/kitty/konsole, file manager-ul tău, etc).
 """
 
+import shlex
+import shutil
 import subprocess
+from src.core.config import valoare
 from src.core.registry import unealta
 
 # ---- Alias -> comanda reală de pe sistemul tău ----
 # Modifică valorile astea ca să corespundă cu binarele instalate la tine.
+# FIX: aplicațiile erau hardcodate (vivaldi, alacritty, nautilus, code): pe un sistem fără ele,
+# „deschide browserul" eșua mereu. Acum se alege prima instalată din listă; poți fixa una anume în
+# config/jarvis.toml ([aplicatii]) sau cu JARVIS_APP_BROWSER / _EDITOR / _TERMINAL / _FILE_MANAGER.
 ALIAS_APLICATII = {
-    "browser": "vivaldi",
-    "editor": "code",
-    "terminal": "alacritty",       # schimbă cu kitty/konsole/etc dacă ai altceva
-    "file_manager": "nautilus",    # schimbă cu dolphin/thunar/etc dacă ai altceva
+    "browser": ["vivaldi", "firefox", "chromium", "google-chrome-stable", "brave", "opera"],
+    "editor": ["code", "codium", "code-oss", "zed", "kate", "gedit"],
+    "terminal": ["alacritty", "kitty", "konsole", "gnome-terminal", "xfce4-terminal", "foot", "wezterm", "xterm"],
+    "file_manager": ["nautilus", "dolphin", "thunar", "pcmanfm", "nemo"],
 }
+
+
+def _alege_aplicatie(alias: str):
+    """(argumente de lansare sau None, lista de binare încercate). Configurarea explicită are prioritate."""
+    configurat = valoare("aplicatii", alias, "", env=f"JARVIS_APP_{alias.upper()}")
+    if configurat:
+        argumente = shlex.split(configurat)
+        return (argumente if argumente and shutil.which(argumente[0]) else None), [configurat]
+    candidati = ALIAS_APLICATII[alias]
+    for c in candidati:
+        if shutil.which(c):
+            return [c], candidati
+    return None, candidati
 
 # ---- Comenzi read-only permise. Gemini trimite DOAR cheia, nu text liber. ----
 ALIAS_COMENZI = {
@@ -60,7 +79,7 @@ ALIAS_COMENZI = {
 )
 def deschide_aplicatie(alias: str):
     """Lansează o aplicație GUI prin alias, fără să blocheze Jarvis."""
-    alias = alias.lower().strip()
+    alias = str(alias or "").lower().strip()  # FIX: None făcea .lower() să arunce
 
     if alias not in ALIAS_APLICATII:
         return (
@@ -68,22 +87,25 @@ def deschide_aplicatie(alias: str):
             f"{', '.join(ALIAS_APLICATII.keys())}."
         )
 
-    comanda = ALIAS_APLICATII[alias]
+    argumente, incercate = _alege_aplicatie(alias)
+    if argumente is None:
+        return (
+            f"Nu am găsit nicio aplicație instalată pentru '{alias}' (am căutat: {', '.join(incercate)}). "
+            f"Setează binarul în config/jarvis.toml, secțiunea [aplicatii], "
+            f"sau cu variabila JARVIS_APP_{alias.upper()}."
+        )
 
+    comanda = " ".join(argumente)
     try:
         # Popen, nu run -- nu vrem să blocăm Jarvis până se închide aplicația
         subprocess.Popen(
-            [comanda],
+            argumente,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
         return f"Am lansat '{comanda}'."
     except FileNotFoundError:
-        return (
-            f"Comanda '{comanda}' nu a fost găsită pe sistem. "
-            f"Verifică dacă e instalată sau dacă alias-ul din ALIAS_APLICATII "
-            f"corespunde binarului real."
-        )
+        return f"Comanda '{comanda}' nu a fost găsită pe sistem."
     except Exception as e:
         return f"Eroare la lansarea aplicației: {str(e)}"
 
@@ -109,7 +131,7 @@ def deschide_aplicatie(alias: str):
 )
 def ruleaza_comanda_info(alias: str):
     """Rulează o comandă read-only dintr-un set fix și returnează output-ul."""
-    alias = alias.lower().strip()
+    alias = str(alias or "").lower().strip()
 
     if alias not in ALIAS_COMENZI:
         return (

@@ -220,6 +220,10 @@ def _arg_sigur(valoare: str, nume: str) -> str:
 
 def _ruleaza_git(args: list[str], cale_repo: str = ".") -> str:
     """Helper intern — rulează o comandă git și returnează outputul."""
+    # FIX: pentru un director inexistent subprocess ridică FileNotFoundError, iar mesajul
+    # „Git nu e instalat" îl făcea pe model să-ți ceară să instalezi Git.
+    if not os.path.isdir(os.path.abspath(cale_repo)):
+        return f"Directorul '{os.path.abspath(cale_repo)}' nu există."
     try:
         rezultat = subprocess.run(
             ["git"] + args,

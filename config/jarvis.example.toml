@@ -10,3 +10,11 @@ utilizator = "Vasea"
 oras = "Chișinău"
 # Fusul orar pentru Google Calendar (nume IANA). Env: JARVIS_TIMEZONE
 fus_orar = "Europe/Chisinau"
+
+[aplicatii]
+# Opțional: binarul folosit pentru „deschide browserul/editorul/terminalul/managerul de fișiere".
+# Dacă lipsește, Jarvis alege prima aplicație instalată dintr-o listă. Env: JARVIS_APP_BROWSER etc.
+# browser = "firefox"
+# editor = "code"
+# terminal = "kitty"
+# file_manager = "dolphin"
