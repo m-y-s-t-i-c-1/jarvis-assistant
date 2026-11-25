@@ -1,7 +1,7 @@
 """Teste pentru runda 7: lansare aplicații, joburi fără shell, mesaje de eroare git."""
 import pytest
 
-from src.tools import developer, joburi, sistem
+from src.tools import developer, hardware, joburi, sistem
 
 
 # ── deschide_aplicatie ────────────────────────────────────────────────────────
@@ -79,3 +79,38 @@ def test_job_normal_porneste(manager_interzis, comanda):
 def test_git_director_inexistent():
     raspuns = developer.git_status("/tmp/nu_exista_deloc_123")
     assert "nu există" in raspuns and "instalat" not in raspuns
+
+
+# ── volum: ieșirea pactl se transformă într-o frază, cu starea mute ──────────
+_PACTL_VOLUM = ("Volume: front-left: 32768 /  50% / -18.06 dB,   front-right: 32768 /  50% / -18.06 dB\n"
+                "        balance 0.00")
+
+
+def _fals_pactl(volum, mute, monkeypatch):
+    class _R:
+        def __init__(self, out): self.returncode, self.stdout, self.stderr = 0, out, ""
+
+    def fals(cmd, **k):
+        return _R(volum if "get-sink-volume" in cmd else mute)
+
+    monkeypatch.setattr(hardware.subprocess, "run", fals)
+
+
+def test_status_volum_formuleaza_frazea(monkeypatch):
+    _fals_pactl(_PACTL_VOLUM, "Mute: no", monkeypatch)
+    assert hardware.status_volum() == "Volumul este 50%."
+
+
+def test_status_volum_spune_si_cand_e_mute(monkeypatch):
+    _fals_pactl(_PACTL_VOLUM, "Mute: yes", monkeypatch)
+    assert hardware.status_volum() == "Volumul este 50% (sunetul e oprit)."
+
+
+def test_status_volum_canale_diferite(monkeypatch):
+    _fals_pactl("Volume: front-left: 20000 /  30% / -31 dB,   front-right: 39000 /  60% / -13 dB", "Mute: no", monkeypatch)
+    assert hardware.status_volum() == "Volumul este între 30% și 60%."
+
+
+def test_status_volum_format_necunoscut_ramane_neschimbat(monkeypatch):
+    _fals_pactl("ceva neașteptat", "Mute: no", monkeypatch)
+    assert hardware.status_volum() == "ceva neașteptat"

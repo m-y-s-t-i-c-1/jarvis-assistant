@@ -14,6 +14,7 @@ Dependențe externe necesare pe sistem:
     pactl ar trebui să existe deja cu PipeWire (pipewire-pulse)
 """
 
+import re
 import subprocess
 from src.core.registry import unealta
 
@@ -203,6 +204,17 @@ def seteaza_volum(procent: int):
         return f"Eroare neașteptată: {str(e)}"
 
 
+def _este_mute() -> bool:
+    """True dacă sink-ul implicit e pe mute; False și când starea nu poate fi citită."""
+    try:
+        rezultat = subprocess.run(
+            ["pactl", "get-sink-mute", "@DEFAULT_SINK@"], capture_output=True, text=True, timeout=5,
+        )
+        return rezultat.returncode == 0 and "yes" in rezultat.stdout.lower()
+    except Exception:
+        return False
+
+
 @unealta(
     description=(
         "Returnează nivelul curent al volumului sistemului, în procente. "
@@ -220,7 +232,17 @@ def status_volum():
         )
         if rezultat.returncode != 0:
             return f"Eroare la citirea volumului: {rezultat.stderr.strip()}"
-        return rezultat.stdout.strip()
+        text = rezultat.stdout.strip()
+        # FIX: se întorcea ieșirea brută a lui pactl („Volume: front-left: 32768 / 50% / -18.06 dB, ..."),
+        # pe care calea reflex o rostea întocmai, iar starea mute nu apărea deloc.
+        procente = [int(p) for p in re.findall(r"(\d+)%", text)]
+        if not procente:
+            return text
+        if min(procente) == max(procente):
+            mesaj = f"Volumul este {procente[0]}%"
+        else:
+            mesaj = f"Volumul este între {min(procente)}% și {max(procente)}%"
+        return mesaj + (" (sunetul e oprit)." if _este_mute() else ".")
     except FileNotFoundError:
         return "Comanda 'pactl' nu a fost găsită. Verifică instalarea PipeWire/PulseAudio."
     except Exception as e:
