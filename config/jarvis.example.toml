@@ -18,3 +18,8 @@ fus_orar = "Europe/Chisinau"
 # editor = "code"
 # terminal = "kitty"
 # file_manager = "dolphin"
+
+[monitor]
+# Monitorul de ecran trimite periodic screenshot-uri către API-uri externe: oprit implicit.
+# Env: JARVIS_MONITOR_ECRAN
+# ecran = true

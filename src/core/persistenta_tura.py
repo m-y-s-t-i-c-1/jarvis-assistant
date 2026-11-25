@@ -10,6 +10,7 @@ dar sigur pentru fundal: orice eroare e înghițită, nu oprește conversația.
 import threading
 
 _lock_consolidare = threading.Lock()
+_lock_ture = threading.Lock()
 _ture = 0
 
 # Consolidarea memoriei rulează la fiecare N ture vocale (main.py folosește „la 10 mesaje" din DB,
@@ -60,6 +61,10 @@ def salveaza_tura(sesiune_id: str, text_user: str, raspuns: str, client=None,
     except Exception as e:
         print(f"[Memorie] Extragere omisă: {e}")
 
-    _ture += 1
-    if _ture % CONSOLIDARE_LA_N_TURE == 0:
+    # FIX: `_ture += 1` nu e atomic, iar tura vocală și cea text rulează pe thread-uri diferite: se pierdeau
+    # incrementări și consolidarea pornea o dată în plus sau în minus.
+    with _lock_ture:
+        _ture += 1
+        e_timpul_consolidarii = _ture % CONSOLIDARE_LA_N_TURE == 0
+    if e_timpul_consolidarii:
         threading.Thread(target=_consolidare_in_fundal, args=(client, model), daemon=True).start()

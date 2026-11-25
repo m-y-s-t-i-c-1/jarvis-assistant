@@ -71,3 +71,12 @@ UTILIZATOR: str = valoare("persona", "utilizator", "Vasea", env="JARVIS_USER")
 def personalizeaza(text: str) -> str:
     """Înlocuiește jetonul {utilizator} din prompturi cu numele configurat."""
     return text.replace(_JETON_UTILIZATOR, UTILIZATOR)
+
+
+_ADEVARAT = ("1", "true", "da", "on", "yes")
+
+
+def monitor_ecran_activ() -> bool:
+    """Monitorul de ecran trimite periodic screenshot-uri către API-uri externe, deci e OPRIT implicit.
+    Se pornește cu JARVIS_MONITOR_ECRAN=1 sau cu `[monitor] ecran = true` în config/jarvis.toml."""
+    return valoare("monitor", "ecran", "0", env="JARVIS_MONITOR_ECRAN").lower() in _ADEVARAT

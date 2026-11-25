@@ -28,6 +28,7 @@ NU blochează pornirea restului lui Jarvis.
 import atexit
 import re
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -70,18 +71,23 @@ atexit.register(_termina_procesele)
 
 def _urmareste_sursa(comanda: list[str], nume_sursa: str, callback):
     """Pornește un subproces în follow mode și verifică fiecare linie nouă."""
+    # FIX: stderr era un pipe pe care nu-l citea nimeni cât timp se citea stdout: un proces care scrie mult pe
+    # stderr (peste ~64 KB) se bloca, iar monitorul îngheța fără nicio eroare. Un fișier temporar nu se umple.
+    fisier_stderr = tempfile.TemporaryFile(mode="w+", errors="replace")
     try:
         proces = subprocess.Popen(
             comanda,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=fisier_stderr,
             text=True,
             bufsize=1,
         )
     except FileNotFoundError:
+        fisier_stderr.close()
         print(f"[Monitor Log] '{comanda[0]}' nu e instalat — monitorizare '{nume_sursa}' dezactivată.")
         return
     except Exception as e:
+        fisier_stderr.close()
         print(f"[Monitor Log] Eroare la pornirea monitorizării '{nume_sursa}': {e}")
         return
 
@@ -92,6 +98,7 @@ def _urmareste_sursa(comanda: list[str], nume_sursa: str, callback):
     for linie in proces.stdout:
         if _opreste_monitorizarea.is_set():
             proces.terminate()
+            fisier_stderr.close()
             return
 
         if not PATTERN_EROARE.search(linie):
@@ -111,8 +118,10 @@ def _urmareste_sursa(comanda: list[str], nume_sursa: str, callback):
     # din motive de permisiuni, ca să dăm un mesaj util în loc de tăcere.
     proces.wait(timeout=2) if proces.poll() is None else None
     if proces.returncode not in (0, None, -15):  # -15 = terminat de noi (SIGTERM)
-        eroare = proces.stderr.read() if proces.stderr else ""
-        print(f"[Monitor Log] '{nume_sursa}' s-a oprit neașteptat (cod {proces.returncode}). {eroare[:200]}")
+        fisier_stderr.seek(0)
+        eroare = fisier_stderr.read(200)
+        print(f"[Monitor Log] '{nume_sursa}' s-a oprit neașteptat (cod {proces.returncode}). {eroare}")
+    fisier_stderr.close()
 
 
 def porneste_monitorizare_log(callback):

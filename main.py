@@ -14,7 +14,7 @@ from src.core.agent import agent_loop
 from src.core.jobs import porneste_thread_watcher
 from src.core.context_manager import proceseaza as proceseaza_context
 from src.core.database import db
-from src.core.config import UTILIZATOR, personalizeaza
+from src.core.config import UTILIZATOR, personalizeaza, monitor_ecran_activ
 from src.core import reflex
 from src.core.memory import memorie
 from src.core.rag import rag
@@ -644,12 +644,12 @@ def main():
     threading.Thread(target=_bucla_alerte, daemon=True).start()
 
     porneste_thread_watcher(la_job_terminat=_anunta_job_vocal)
-    # FIX: monitorul de ecran pornea mereu și nu putea fi oprit; trimite periodic screenshot-uri
-    # întregi către un API extern (cotă + confidențialitate). JARVIS_MONITOR_ECRAN=0 îl dezactivează.
-    if os.getenv("JARVIS_MONITOR_ECRAN", "1").strip().lower() not in ("0", "false", "nu", "off", "no"):
+    # Monitorul de ecran trimite periodic screenshot-uri întregi către un API extern (cotă + confidențialitate),
+    # deci e OPRIT implicit. JARVIS_MONITOR_ECRAN=1 (în .env) sau `[monitor] ecran = true` îl pornește.
+    if monitor_ecran_activ():
         porneste_monitorizare_ecran(_la_schimbare_ecran)
     else:
-        print("[Monitor Ecran] Dezactivat din .env (JARVIS_MONITOR_ECRAN=0).")
+        print("[Monitor Ecran] Oprit (implicit). Pornește-l cu JARVIS_MONITOR_ECRAN=1 în .env.")
     porneste_monitorizare_log(_la_eroare_log)
     istoric = []
     sesiune_id = db.incepe_sesiune()

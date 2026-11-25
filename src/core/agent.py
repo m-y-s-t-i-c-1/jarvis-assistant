@@ -287,10 +287,10 @@ def agent_loop(
 # răspunsul înainte să înceapă vorbirea.
 #
 # Compromisuri asumate față de agent_loop normal:
-#   - NU are plasa anti-halucinație (retry forțat pe function calling) —
-#     ar necesita să aștepte tot răspunsul oricum, anulând beneficiul
-#     de streaming. Pentru conversație vocală fluidă, prioritizăm
-#     latența joasă față de acea plasă suplimentară.
+#   - Plasa anti-halucinație (retry forțat pe function calling) există, dar
+#     reține doar propozițiile suspecte („am deschis…", „este ora…") și ce
+#     urmează după ele, în pasul respectiv; restul se rostește imediat.
+#     Latența crește doar pe răspunsurile care chiar afirmă o acțiune.
 #   - Generarea și vorbirea NU rulează în paralel (thread-uri separate)
 #     în această versiune — Jarvis generează o propoziție, o rostește,
 #     apoi continuă generarea următoarei. Tot e mult mai rapid perceput
@@ -394,11 +394,25 @@ def agent_loop_streaming(
     """
     unelte = get_unelte_pentru_gemini(doar_functiile=unelte_permise)
 
+    # Plasa anti-halucinație și pe calea streaming (la fel ca în agent_loop): o propoziție care afirmă o
+    # acțiune sau o oră („am deschis…", „este ora…") fără niciun apel de unealtă se reține în loc să fie
+    # rostită, iar la finalul pasului, dacă nu a urmat niciun apel, cerem din nou răspunsul cu function
+    # calling forțat. Doar propozițiile suspecte (și ce vine după ele) întârzie; restul se rostește imediat.
+    a_facut_deja_retry_fortat = False
+    a_folosit_tool_in_aceasta_tura = False
+    fortare_unelte = False
+
     # FIX: după MAX_PASI runde de unelte, rezultatele ultimei runde rămâneau fără răspuns al modelului
     # (istoric terminat cu function_response) și utilizatorul primea doar „buclă lungă". Dăm un
     # pas suplimentar FĂRĂ unelte, ca modelul să formuleze răspunsul final din ce a aflat.
     for pas in range(MAX_PASI + 1):
         history = istoric[:-1] if len(istoric) > 1 else []
+        config_extra = {}
+        if fortare_unelte:
+            config_extra["tool_config"] = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(mode="ANY")
+            )
+            fortare_unelte = False
         chat = client.chats.create(
             model=model,
             history=history,
@@ -408,6 +422,7 @@ def agent_loop_streaming(
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(
                     disable=True
                 ),
+                **config_extra,
             ),
         )
 
@@ -427,10 +442,23 @@ def agent_loop_streaming(
         # Ținem propozițiile trimise efectiv la TTS (inclusiv cea întreruptă, auzită parțial).
         propozitii_rostite: list[str] = []
 
-        def _rosteste(propozitie: str, _lista=propozitii_rostite) -> None:
+        poate_retine = bool(
+            unelte and pas < MAX_PASI and la_propozitie_gata is not None
+            and not a_facut_deja_retry_fortat and not a_folosit_tool_in_aceasta_tura
+        )
+        retinute: list[str] = []
+
+        def _emite(propozitie: str, _lista=propozitii_rostite) -> None:
             _lista.append(propozitie)
             if la_propozitie_gata:
                 la_propozitie_gata(propozitie)
+
+        def _rosteste(propozitie: str, _retinute=retinute, _poate=poate_retine) -> None:
+            # După prima propoziție suspectă reținem și restul pasului, ca să nu se rostească în altă ordine.
+            if _poate and (_retinute or _raspunsul_pare_suspect(propozitie)):
+                _retinute.append(propozitie)
+                return
+            _emite(propozitie)
 
         _start_gemini = time.perf_counter()
         _primul_chunk_masurat = False
@@ -506,9 +534,21 @@ def agent_loop_streaming(
 
         # Ce a rămas în buffer (ultima propoziție, fără spațiu final tăiat)
         if buffer_text.strip() and la_propozitie_gata:
-            la_propozitie_gata(buffer_text.strip())
+            _rosteste(buffer_text.strip())
+
+        if retinute:
+            if apeluri_functii:
+                for propozitie in retinute:    # modelul a și apelat o unealtă: afirmațiile au acoperire
+                    _emite(propozitie)
+            else:
+                print("[Avertisment: răspuns posibil halucinat fără tool call (streaming). "
+                      "Nu îl rostesc; cer din nou răspunsul cu function calling forțat.]")
+                a_facut_deja_retry_fortat = True
+                fortare_unelte = True
+                continue    # istoricul nu s-a modificat: se retrimite același mesaj al utilizatorului
 
         if apeluri_functii:
+            a_folosit_tool_in_aceasta_tura = True
             if continut_final is not None:
                 istoric.append(continut_final)
 

@@ -182,6 +182,10 @@ def _opreste_player_curent() -> None:
         _seteaza_player(None)
 
 
+# Un player care rulează cel puțin atât a redat deja ceva: la eșec nu mai încercăm altul pe aceeași propoziție.
+_PRAG_REDARE_PARTIALA_S = 0.5
+
+
 def _reda_cu_player_extern(cale_wav: str) -> bool:
     """
     Redă WAV printr-un player extern. Returnează True dacă a reușit să
@@ -210,14 +214,20 @@ def _reda_cu_player_extern(cale_wav: str) -> bool:
             continue
 
         _seteaza_player(proc)
+        pornit_la = time.monotonic()
         try:
             while proc.poll() is None:
                 if _stop_event.is_set():
                     _opreste_player_curent()
                     return True
                 time.sleep(0.05)
-            # Cod != 0: încercăm următorul player (ex: sink inexistent)
+            # Cod != 0: încercăm următorul player (ex: sink inexistent) — DOAR dacă a eșuat de la început.
+            # FIX: un player care s-a oprit după ce a redat deja o parte din propoziție făcea ca
+            # următorul să o reia de la capăt, deci o auzeai de două ori.
             if proc.returncode not in (0, None) and not _stop_event.is_set():
+                if time.monotonic() - pornit_la >= _PRAG_REDARE_PARTIALA_S:
+                    print(f"[TTS] {cmd[0]} s-a oprit la jumătate (cod {proc.returncode}); nu reiau propoziția.")
+                    return True
                 erori.append(f"{cmd[0]} exit {proc.returncode}")
                 continue
             return True

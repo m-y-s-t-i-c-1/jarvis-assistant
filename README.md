@@ -64,8 +64,9 @@ Google Calendar: pune `credentials.json` în rădăcina proiectului și rulează
 ## Confidențialitate
 
 - Mesajele se trimit la providerii configurați (Gemini și, dacă ai chei, NVIDIA/Groq/OpenRouter/Bytez).
-- **Monitorul de ecran** trimite periodic screenshot-uri către API-uri externe. Dezactivează-l cu
-  `JARVIS_MONITOR_ECRAN=0` în `.env`.
+- **Monitorul de ecran** trimite periodic screenshot-uri către API-uri externe, deci e **oprit implicit**.
+  Îl pornești cu `JARVIS_MONITOR_ECRAN=1` în `.env`. (Unealta `vezi_ecranul` trimite un screenshot doar
+  când i-o ceri explicit.)
 - Datele locale: `~/.jarvis/jarvis.db` (conversații, memorie), `~/.jarvis/chroma/` (vectori),
   `~/.jarvis/git_safety_log.txt` (checkpoint-uri Git).
 - UI-ul web ascultă implicit doar pe `127.0.0.1`.
